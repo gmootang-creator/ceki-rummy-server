@@ -171,4 +171,4 @@ wss.on('connection',ws=>{
       if(type==='DRAW_DECK'){
         if(room.turn!==pidx||room.phase!=='draw')return;
         if(room.deck.length===0){endRound(room,null);return;}
-        room.players[pidx].hand.push(room.deck.shif
+        room.players[pidx].hand.push(room.deck.shift());
