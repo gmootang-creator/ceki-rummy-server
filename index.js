@@ -172,3 +172,97 @@ wss.on('connection',ws=>{
         if(room.turn!==pidx||room.phase!=='draw')return;
         if(room.deck.length===0){endRound(room,null);return;}
         room.players[pidx].hand.push(room.deck.shift());
+        room.phase='action';
+        sendGameState(room);
+      }
+
+      else if(type==='TAKE_DISCARD'){
+        if(room.turn!==pidx||room.phase!=='draw'||room.discard.length===0)return;
+        room.players[pidx].hand.push(room.discard.pop());
+        room.phase='action';
+        sendGameState(room);
+      }
+
+      else if(type==='DECLARE_SET'){
+        if(room.turn!==pidx||room.phase!=='action')return;
+        const player=room.players[pidx];
+        const cards=player.hand.filter(c=>cardIds.includes(c.id));
+        if(cards.length!==setSize){send(ws,{type:'ERROR',msg:`Select exactly ${setSize} cards`});return;}
+        if(!isValidSet(cards)){send(ws,{type:'ERROR',msg:'Invalid set'});return;}
+        const f=player.sets.filter(Boolean);
+        if(setSize===4&&f.filter(s=>s.length===4).length>=1){send(ws,{type:'ERROR',msg:'Already have set of 4'});return;}
+        if(setSize===3&&f.filter(s=>s.length===3).length>=2){send(ws,{type:'ERROR',msg:'Already have 2 sets of 3'});return;}
+        let slot=-1;
+        if(setSize===4){
+          slot=player.sets[0]===null?0:player.sets.findIndex(s=>s===null);
+        } else {
+          const hasFour=player.sets.some(s=>s&&s.length===4);
+          if(!hasFour){
+            slot=player.sets.findIndex((s,i)=>s===null&&i>0);
+            if(slot===-1)slot=player.sets.findIndex(s=>s===null);
+          } else {
+            slot=player.sets.findIndex(s=>s===null);
+          }
+        }
+        if(slot<0){send(ws,{type:'ERROR',msg:'All slots full'});return;}
+        player.sets[slot]=cards;
+        player.hand=player.hand.filter(c=>!cardIds.includes(c.id));
+        sendGameState(room);
+      }
+
+      else if(type==='UNDO_SET'){
+        if(room.turn!==pidx||room.phase!=='action')return;
+        const player=room.players[pidx];
+        if(!player.sets[slotIdx])return;
+        const cards=player.sets[slotIdx];
+        player.sets[slotIdx]=null;
+        player.hand=[...player.hand,...cards];
+        sendGameState(room);
+      }
+
+      else if(type==='DISCARD_CARD'){
+        if(room.turn!==pidx||room.phase!=='action')return;
+        const player=room.players[pidx];
+        const idx=player.hand.findIndex(c=>c.id===cardId);
+        if(idx<0)return;
+        room.discard.push(player.hand.splice(idx,1)[0]);
+        room.turn=1-pidx;
+        room.phase='draw';
+        sendGameState(room);
+      }
+
+      else if(type==='DECLARE_WIN'){
+        if(room.turn!==pidx||room.phase!=='action')return;
+        const player=room.players[pidx];
+        if(!setsComplete(player.sets)){send(ws,{type:'ERROR',msg:'Sets not complete'});return;}
+        endRound(room,pidx);
+      }
+
+      else if(type==='NEXT_ROUND'){
+        const needed=Math.ceil(room.totalGames/2);
+        if(room.scores[0]>=needed||room.scores[1]>=needed)return;
+        dealRound(room);
+        broadcast(room,{type:'GAME_START'});
+        sendGameState(room);
+      }
+
+      else if(type==='CHAT'){
+        const opp=room.players[1-pidx];
+        if(opp) send(opp.ws,{type:'CHAT',text:msg.text});
+      }
+    }
+  });
+
+  ws.on('close',()=>{
+    const room=rooms[ws.roomCode];
+    if(room){
+      room.players.forEach(p=>{
+        if(p.ws!==ws) send(p.ws,{type:'ERROR',msg:'Opponent disconnected'});
+      });
+      delete rooms[ws.roomCode];
+    }
+    console.log('Client disconnected');
+  });
+});
+
+console.log(`Server running on port ${PORT}`);
