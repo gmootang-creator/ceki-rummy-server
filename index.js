@@ -4,7 +4,6 @@ import {
   SafeAreaView, TextInput, ActivityIndicator, Animated,
   Vibration, Platform, AppState
 } from 'react-native';
-import { Audio } from 'expo-av';
 
 const SERVER_URL = 'wss://ceki-rummy-server-production.up.railway.app';
 
@@ -170,19 +169,6 @@ export default function App(){
     setTimeLeft(60);
   };
 
-  const playSound=async(type)=>{
-    try{
-      const url=type==='win'
-        ?'https://assets.mixkit.co/active_storage/sfx/2018/2018-preview.mp3'
-        :type==='lose'
-        ?'https://assets.mixkit.co/active_storage/sfx/2027/2027-preview.mp3'
-        :'https://assets.mixkit.co/active_storage/sfx/2073/2073-preview.mp3';
-      const{sound}=await Audio.Sound.createAsync({uri:url});
-      await sound.playAsync();
-      sound.setOnPlaybackStatusUpdate(s=>{if(s.didJustFinish)sound.unloadAsync();});
-    }catch(e){}
-  };
-
   const vibrate=useCallback((pattern='light')=>{
     try{
       if(Platform.OS==='web')return;
@@ -248,8 +234,8 @@ export default function App(){
     }
     else if(data.type==='ROUND_OVER'){
       stopTurnTimer();setRoundOver(data);setSelIds([]);setMoveIdx(null);
-      if(data.winner==='you'){vibrate('success');playSound('win');}
-      else if(data.winner==='opponent'){vibrate('heavy');playSound('lose');}
+      if(data.winner==='you')vibrate('success');
+      else if(data.winner==='opponent')vibrate('heavy');
     }
     else if(data.type==='CHAT'){
       setChatMsgs(m=>[...m,{text:data.text,isMe:false}]);setNewMsg(true);vibrate('light');
@@ -298,7 +284,7 @@ export default function App(){
 
   const tapCard=(id)=>{
     if(!onlineState||onlineState.turn!=='yours'||onlineState.phase!=='action')return;
-    vibrate('light');playSound('card');
+    vibrate('light');
     setSelIds(s=>s.includes(id)?s.filter(x=>x!==id):[...s,id]);
   };
 
@@ -354,20 +340,20 @@ export default function App(){
           if(set){const slot=aiSets.findIndex(s=>s===null);if(slot>=0){aiSets[slot]=set;aiHand=aiHand.filter(c=>!set.some(s=>s.id===c.id));break;}}
         }
       }
-      if(setsComplete(aiSets)){playSound('lose');return{...cur,aiHand,aiSets,deck,discard,scores:{...cur.scores,ai:cur.scores.ai+1},turn:'done',roundWinner:'ai',msg:'AI wins!'};}
+      if(setsComplete(aiSets))return{...cur,aiHand,aiSets,deck,discard,scores:{...cur.scores,ai:cur.scores.ai+1},turn:'done',roundWinner:'ai',msg:'AI wins!'};
       if(aiHand.length>0)discard.push(aiHand.splice(Math.floor(Math.random()*aiHand.length),1)[0]);
       return{...cur,aiHand,aiSets,deck,discard,turn:'player',phase:'draw',selIds:[],moveIdx:null,msg:'Your turn — tap DECK or DISCARD'};
     });
   };
 
-  const aiTapDeck=()=>{vibrate('light');playSound('card');setGame(g=>{if(!g||g.turn!=='player'||g.phase!=='draw'||g.deck.length===0)return g;const card=g.deck[0];return{...g,deck:g.deck.slice(1),playerHand:[...g.playerHand,card],phase:'action',selIds:[],moveIdx:null,msg:'Card drawn!'};});};
-  const aiTakeDiscard=()=>{vibrate('light');playSound('card');setGame(g=>{if(!g||g.turn!=='player'||g.phase!=='draw'||g.discard.length===0)return g;const card=g.discard[g.discard.length-1];return{...g,discard:g.discard.slice(0,-1),playerHand:[...g.playerHand,card],phase:'action',selIds:[],moveIdx:null,msg:'Took discard!'};});};
-  const aiTapCard=(id)=>{vibrate('light');playSound('card');setGame(g=>{if(!g||g.turn!=='player'||g.phase!=='action')return g;const already=g.selIds.includes(id);return{...g,selIds:already?g.selIds.filter(x=>x!==id):[...g.selIds,id]};});};
+  const aiTapDeck=()=>{vibrate('light');setGame(g=>{if(!g||g.turn!=='player'||g.phase!=='draw'||g.deck.length===0)return g;const card=g.deck[0];return{...g,deck:g.deck.slice(1),playerHand:[...g.playerHand,card],phase:'action',selIds:[],moveIdx:null,msg:'Card drawn!'};});};
+  const aiTakeDiscard=()=>{vibrate('light');setGame(g=>{if(!g||g.turn!=='player'||g.phase!=='draw'||g.discard.length===0)return g;const card=g.discard[g.discard.length-1];return{...g,discard:g.discard.slice(0,-1),playerHand:[...g.playerHand,card],phase:'action',selIds:[],moveIdx:null,msg:'Took discard!'};});};
+  const aiTapCard=(id)=>{vibrate('light');setGame(g=>{if(!g||g.turn!=='player'||g.phase!=='action')return g;const already=g.selIds.includes(id);return{...g,selIds:already?g.selIds.filter(x=>x!==id):[...g.selIds,id]};});};
   const aiLongPress=(idx)=>{vibrate('light');setGame(g=>{if(!g)return g;return{...g,moveIdx:g.moveIdx===idx?null:idx};});};
   const aiDeclareSet=(size)=>{vibrate('success');setGame(g=>{if(!g)return g;const cards=g.playerHand.filter(c=>g.selIds.includes(c.id));if(cards.length!==size)return{...g,msg:`Select exactly ${size} cards`};if(!isValidSet(cards))return{...g,msg:'❌ Invalid set!'};const f=g.playerSets.filter(Boolean);if(size===4&&f.filter(s=>s.length===4).length>=1)return{...g,msg:'Already have set of 4!'};if(size===3&&f.filter(s=>s.length===3).length>=2)return{...g,msg:'Already have 2 sets of 3!'};const newSets=[...g.playerSets];let slot=-1;if(size===4){slot=newSets[0]===null?0:newSets.findIndex(s=>s===null);}else{const hasFour=newSets.some(s=>s&&s.length===4);if(!hasFour){slot=newSets.findIndex((s,i)=>s===null&&i>0);if(slot===-1)slot=newSets.findIndex(s=>s===null);}else slot=newSets.findIndex(s=>s===null);}if(slot<0)return{...g,msg:'All slots full!'};newSets[slot]=cards;const newHand=g.playerHand.filter(c=>!g.selIds.includes(c.id));const done=setsComplete(newSets);return{...g,playerSets:newSets,playerHand:newHand,selIds:[],moveIdx:null,msg:done?'🎉 All sets done! Press Declare Win!':`Set of ${size} locked in!`};});};
   const aiUndoSet=(idx)=>{setGame(g=>{if(!g||!g.playerSets[idx])return g;const set=g.playerSets[idx];const newSets=[...g.playerSets];newSets[idx]=null;return{...g,playerSets:newSets,playerHand:[...g.playerHand,...set],msg:'Set returned to hand.'};});};
-  const aiDiscard=()=>{vibrate('light');playSound('card');setGame(g=>{if(!g||g.selIds.length!==1||g.phase!=='action')return g;const id=g.selIds[0];const card=g.playerHand.find(c=>c.id===id);if(!card)return g;return{...g,playerHand:g.playerHand.filter(c=>c.id!==id),discard:[...g.discard,card],selIds:[],moveIdx:null,turn:'ai',phase:'draw',msg:"Opponent's turn..."};});setTimeout(doAiTurn,1200);};
-  const aiDeclareWin=()=>{vibrate('success');playSound('win');setGame(g=>{if(!g||!setsComplete(g.playerSets))return g;return{...g,scores:{...g.scores,player:g.scores.player+1},turn:'done',roundWinner:'player',msg:'You win!'};});};
+  const aiDiscard=()=>{vibrate('light');setGame(g=>{if(!g||g.selIds.length!==1||g.phase!=='action')return g;const id=g.selIds[0];const card=g.playerHand.find(c=>c.id===id);if(!card)return g;return{...g,playerHand:g.playerHand.filter(c=>c.id!==id),discard:[...g.discard,card],selIds:[],moveIdx:null,turn:'ai',phase:'draw',msg:"Opponent's turn..."};});setTimeout(doAiTurn,1200);};
+  const aiDeclareWin=()=>{vibrate('success');setGame(g=>{if(!g||!setsComplete(g.playerSets))return g;return{...g,scores:{...g.scores,player:g.scores.player+1},turn:'done',roundWinner:'player',msg:'You win!'};});};
 
   // ── SHARED HELPERS ──
   const renderHand=(hand,onTap,onLong,selIdsVal,moveIdxVal,canSelect)=>(
@@ -458,7 +444,7 @@ export default function App(){
   const renderRejoinBanner=()=>(
     showRejoin&&lastRoomCode?(
       <View style={st.rejoinBanner}>
-        <Text style={st.rejoinTitle}>⚠️ Disconnected</Text>
+        <Text style={st.rejoinTitle}>⚠️ Disconnected from game</Text>
         <Text style={st.rejoinSub}>Room: <Text style={{color:C.gold,fontWeight:'700'}}>{lastRoomCode}</Text></Text>
         {connecting?(
           <ActivityIndicator color={C.gold} style={{marginTop:8}}/>
@@ -584,10 +570,12 @@ export default function App(){
     const sel=selIds.length;
     const needed=Math.ceil(o.totalGames/2);
     const timerColor=timeLeft<=10?C.red:timeLeft<=20?C.gold:C.green;
+
     return(
       <SafeAreaView style={st.bg}>
         <ScrollView contentContainerStyle={st.gameWrap}>
           {renderRejoinBanner()}
+
           <View style={st.header}>
             <View style={st.scoreItem}><Text style={st.scoreN}>{o.scores[0]}</Text><Text style={st.scoreLb}>{o.yourName}</Text></View>
             <View style={{alignItems:'center'}}>
@@ -597,6 +585,7 @@ export default function App(){
             </View>
             <View style={st.scoreItem}><Text style={st.scoreN}>{o.scores[1]}</Text><Text style={st.scoreLb}>{o.oppName}</Text></View>
           </View>
+
           <View style={st.oppZone}>
             <View style={st.row}>
               <Text style={st.oppTitle}>{o.oppName}</Text>
@@ -611,10 +600,11 @@ export default function App(){
               <View style={[st.badge,o.oppSetsThrees>=2&&st.badgeDone,o.oppSetsThrees===1&&st.badgeHalf]}><Text style={st.badgeT}>{o.oppSetsThrees}/2 Sets of 3</Text></View>
             </View>
           </View>
+
           <View style={[st.row,{gap:10,marginBottom:10,alignItems:'flex-start'}]}>
             <View style={{alignItems:'center'}}>
               <Text style={st.pileLabel}>DECK</Text>
-              <TouchableOpacity style={[st.deckPile,inDraw&&st.pileGlow]} onPress={()=>{vibrate();playSound('card');sendWS({type:'DRAW_DECK'});}}>
+              <TouchableOpacity style={[st.deckPile,inDraw&&st.pileGlow]} onPress={()=>{vibrate();sendWS({type:'DRAW_DECK'});}}>
                 <CardBack/>
                 <View style={st.deckCount}><Text style={st.deckCountText}>{o.deckCount}</Text></View>
               </TouchableOpacity>
@@ -623,7 +613,7 @@ export default function App(){
             <View style={{alignItems:'center'}}>
               <Text style={st.pileLabel}>DISCARD</Text>
               {topD?(
-                <TouchableOpacity style={[st.discardPile,inDraw&&st.pileGlow]} onPress={()=>{vibrate();playSound('card');sendWS({type:'TAKE_DISCARD'});}}>
+                <TouchableOpacity style={[st.discardPile,inDraw&&st.pileGlow]} onPress={()=>{vibrate();sendWS({type:'TAKE_DISCARD'});}}>
                   <CardFace card={topD} onPress={()=>{}}/>
                 </TouchableOpacity>
               ):(
@@ -633,6 +623,7 @@ export default function App(){
             </View>
             <View style={st.msgBox}><Text style={st.msgText}>{msg}</Text></View>
           </View>
+
           <View style={st.playerZone}>
             <View style={st.row}>
               <Text style={st.playerTitle}>Your Hand ({localHand.length})</Text>
@@ -645,12 +636,14 @@ export default function App(){
             <View style={{marginTop:10,gap:8}}>
               {inAction&&sel===4&&myFours<1&&<TouchableOpacity style={st.btnDeclare} onPress={()=>{vibrate('success');sendWS({type:'DECLARE_SET',cardIds:selIds,setSize:4});setSelIds([]);}}><Text style={st.btnDeclareT}>✓ Declare Set of 4</Text></TouchableOpacity>}
               {inAction&&sel===3&&myThrees<2&&<TouchableOpacity style={st.btnDeclare} onPress={()=>{vibrate('success');sendWS({type:'DECLARE_SET',cardIds:selIds,setSize:3});setSelIds([]);}}><Text style={st.btnDeclareT}>✓ Declare Set of 3</Text></TouchableOpacity>}
-              {inAction&&sel===1&&<TouchableOpacity style={st.btnDiscard} onPress={()=>{vibrate('light');playSound('card');sendWS({type:'DISCARD_CARD',cardId:selIds[0]});setSelIds([]);setMoveIdx(null);stopTurnTimer();}}><Text style={st.btnDiscardT}>Discard &amp; End Turn</Text></TouchableOpacity>}
-              {inAction&&setsComplete(o.yourSets)&&<TouchableOpacity style={st.btnWin} onPress={()=>{vibrate('success');playSound('win');sendWS({type:'DECLARE_WIN'});stopTurnTimer();}}><Text style={st.btnWinT}>🏆 Declare Win!</Text></TouchableOpacity>}
+              {inAction&&sel===1&&<TouchableOpacity style={st.btnDiscard} onPress={()=>{vibrate('light');sendWS({type:'DISCARD_CARD',cardId:selIds[0]});setSelIds([]);setMoveIdx(null);stopTurnTimer();}}><Text style={st.btnDiscardT}>Discard &amp; End Turn</Text></TouchableOpacity>}
+              {inAction&&setsComplete(o.yourSets)&&<TouchableOpacity style={st.btnWin} onPress={()=>{vibrate('success');sendWS({type:'DECLARE_WIN'});stopTurnTimer();}}><Text style={st.btnWinT}>🏆 Declare Win!</Text></TouchableOpacity>}
             </View>
             {sel>0&&<TouchableOpacity onPress={()=>setSelIds([])}><Text style={{fontSize:11,color:C.textFaint,textAlign:'center',marginTop:6}}>✕ Clear selection</Text></TouchableOpacity>}
           </View>
+
           {renderSets(o.yourSets,(i)=>sendWS({type:'UNDO_SET',slotIdx:i}))}
+
           <View style={st.chatZone}>
             <TouchableOpacity style={st.chatToggle} onPress={()=>{setShowChat(s=>!s);setNewMsg(false);}}>
               <Text style={st.chatToggleT}>💬 Chat {newMsg&&!showChat?'🔴':''}</Text>
@@ -676,7 +669,9 @@ export default function App(){
               </>
             )}
           </View>
+
           {roundOver&&renderRoundOver(roundOver.winner,roundOver.scores,roundOver.yourName,roundOver.oppName,needed,()=>sendWS({type:'NEXT_ROUND'}),()=>sendWS({type:'NEXT_ROUND'}),()=>{closeWS();setScreen('lobby');},roundOver.winnerSets)}
+
         </ScrollView>
       </SafeAreaView>
     );
@@ -694,6 +689,7 @@ export default function App(){
     const myThrees=g.playerSets.filter(Boolean).filter(s=>s.length===3).length;
     const sel=g.selIds.length;
     const isRoundOver=g.turn==='done';
+
     return(
       <SafeAreaView style={st.bg}>
         <ScrollView contentContainerStyle={st.gameWrap}>
@@ -702,6 +698,7 @@ export default function App(){
             <View style={{alignItems:'center'}}><Text style={st.gameTitle}>RUMIKI</Text><Text style={st.roundBadge}>Best of {g.totalGames} · Need {needed}</Text></View>
             <View style={st.scoreItem}><Text style={st.scoreN}>{g.scores.ai}</Text><Text style={st.scoreLb}>AI</Text></View>
           </View>
+
           <View style={st.oppZone}>
             <View style={st.row}>
               <Text style={st.oppTitle}>AI Opponent</Text>
@@ -715,6 +712,7 @@ export default function App(){
               {(()=>{const af=g.aiSets.filter(Boolean);const af4=af.filter(s=>s.length===4).length;const af3=af.filter(s=>s.length===3).length;return(<><View style={[st.badge,af4>=1&&st.badgeDone]}><Text style={st.badgeT}>{af4>=1?'✓ ':''}Set of 4</Text></View><View style={[st.badge,af3>=2&&st.badgeDone,af3===1&&st.badgeHalf]}><Text style={st.badgeT}>{af3}/2 Sets of 3</Text></View></>);})()}
             </View>
           </View>
+
           <View style={[st.row,{gap:10,marginBottom:10,alignItems:'flex-start'}]}>
             <View style={{alignItems:'center'}}>
               <Text style={st.pileLabel}>DECK</Text>
@@ -731,6 +729,7 @@ export default function App(){
             </View>
             <View style={st.msgBox}><Text style={st.msgText}>{g.msg}</Text></View>
           </View>
+
           <View style={st.playerZone}>
             <View style={st.row}>
               <Text style={st.playerTitle}>Your Hand ({g.playerHand.length})</Text>
@@ -752,8 +751,10 @@ export default function App(){
             </View>
             {sel>0&&<TouchableOpacity onPress={()=>setGame(gg=>({...gg,selIds:[]}))}><Text style={{fontSize:11,color:C.textFaint,textAlign:'center',marginTop:6}}>✕ Clear selection</Text></TouchableOpacity>}
           </View>
+
           {renderSets(g.playerSets,aiUndoSet)}
           {isRoundOver&&renderRoundOver(g.roundWinner,[g.scores.player,g.scores.ai],'You','AI',needed,()=>startAiGame(g),null,()=>setScreen('lobby'),g.roundWinner==='player'?g.playerSets:g.aiSets)}
+
         </ScrollView>
       </SafeAreaView>
     );
