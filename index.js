@@ -102,6 +102,7 @@ function collectUsed(room){
   room.players[0].sets=[null,null,null];room.players[1].sets=[null,null,null];
 }
 function endRound(room,winnerIdx){
+  if(room.turnTimer) clearTimeout(room.turnTimer);
   collectUsed(room);
   room.lastWinner=winnerIdx;
   if(winnerIdx!==null)room.scores[winnerIdx]++;
@@ -123,6 +124,45 @@ function endRound(room,winnerIdx){
   });
 }
 
+function startTurnTimer(room){
+  if(room.turnTimer) clearTimeout(room.turnTimer);
+  room.turnTimer=setTimeout(()=>{
+    const pidx=room.turn;
+    if(!room.players[pidx]) return;
+    const player=room.players[pidx];
+
+    if(room.phase==='draw'){
+      // Player didn't draw — lose their turn, pass to opponent
+      room.turn=1-pidx;
+      room.phase='draw';
+      broadcast(room,{type:'TIMES_UP',name:player.name,phase:'draw'});
+      sendGameState(room);
+      startTurnTimer(room);
+
+    } else if(room.phase==='action'){
+      // Player didn't discard — if 11 cards take joker first else random, put in discard
+      const hand=player.hand;
+      if(hand.length>0){
+        const jokerIdx=hand.findIndex(c=>isJoker(c));
+        let card;
+        if(hand.length>=11&&jokerIdx>=0){
+          // Has 11+ cards and joker — take joker first
+          card=hand.splice(jokerIdx,1)[0];
+        } else {
+          // Take random card
+          card=hand.splice(Math.floor(Math.random()*hand.length),1)[0];
+        }
+        room.discard.push(card);
+      }
+      room.turn=1-pidx;
+      room.phase='draw';
+      broadcast(room,{type:'TIMES_UP',name:player.name,phase:'action'});
+      sendGameState(room);
+      startTurnTimer(room);
+    }
+  },62000);
+}
+
 wss.on('connection',ws=>{
   console.log('Client connected');
   ws.on('message',raw=>{
@@ -138,7 +178,8 @@ wss.on('connection',ws=>{
         code:roomCode,totalGames:totalGames||5,
         players:[{ws,hand:[],sets:[null,null,null],name:name||'Player 1',disconnected:false}],
         deck:[],discard:[],usedPool:[],
-        scores:[0,0],turn:0,phase:'draw',lastWinner:null,round:0,started:false,
+        scores:[0,0],turn:0,phase:'draw',lastWinner:null,round:0,
+        started:false,turnTimer:null,
       };
       ws.roomCode=roomCode;ws.playerIdx=0;ws.playerName=name||'Player 1';
       send(ws,{type:'ROOM_CREATED',code:roomCode});
@@ -157,6 +198,7 @@ wss.on('connection',ws=>{
       room.started=true;
       broadcast(room,{type:'GAME_START'});
       sendGameState(room);
+      startTurnTimer(room);
       console.log(`Game started in room ${code}`);
     }
 
@@ -187,12 +229,17 @@ wss.on('connection',ws=>{
         if(room.deck.length===0){endRound(room,null);return;}
         room.players[pidx].hand.push(room.deck.shift());
         room.phase='action';
+        startTurnTimer(room);
         sendGameState(room);
       }
       else if(type==='TAKE_DISCARD'){
-        if(room.turn!==pidx||room.phase!=='draw'||room.discard.length===0)return;
-        room.players[pidx].hand.push(room.discard.pop());
+        if(room.turn!==pidx||room.phase!=='draw')return;
+        if(room.discard.length===0){send(ws,{type:'ERROR',msg:'Discard pile is empty'});return;}
+        const card=room.discard[room.discard.length-1];
+        room.discard=room.discard.slice(0,-1);
+        room.players[pidx].hand.push(card);
         room.phase='action';
+        startTurnTimer(room);
         sendGameState(room);
       }
       else if(type==='DECLARE_SET'){
@@ -238,6 +285,7 @@ wss.on('connection',ws=>{
         room.discard.push(player.hand.splice(idx,1)[0]);
         room.turn=1-pidx;
         room.phase='draw';
+        startTurnTimer(room);
         sendGameState(room);
       }
       else if(type==='DECLARE_WIN'){
@@ -252,6 +300,7 @@ wss.on('connection',ws=>{
         dealRound(room);
         broadcast(room,{type:'GAME_START'});
         sendGameState(room);
+        startTurnTimer(room);
       }
       else if(type==='CHAT'){
         const opp=room.players[1-pidx];
