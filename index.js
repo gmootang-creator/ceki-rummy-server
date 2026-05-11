@@ -1,27 +1,38 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import {
-  View, Text, TouchableOpacity, ScrollView, StyleSheet,
-  SafeAreaView, TextInput, ActivityIndicator, Animated,
-  Vibration, Platform, AppState, Dimensions
-} from 'react-native';
+const WebSocket = require('ws');
+const PORT = process.env.PORT || 8080;
+const wss = new WebSocket.Server({ port: PORT });
 
-const SERVER_URL = 'wss://ceki-rummy-server-production.up.railway.app';
-const {width:SW,height:SH}=Dimensions.get('window');
+let rooms = {};
 
-const C = {
-  bg:'#1a0533',bg2:'#2d0f4e',gold:'#F59E0B',gold2:'#D97706',
-  green:'#10B981',red:'#EF4444',blue:'#3B82F6',
-  purple:'#8B5CF6',text:'#F3F4F6',textDim:'#9CA3AF',textFaint:'#6B7280',
-  border:'#4C1D95',success:'#065F46',
-};
+function generateCode(){
+  return Math.random().toString(36).slice(2,6).toUpperCase();
+}
+function send(ws,data){
+  if(ws&&ws.readyState===WebSocket.OPEN) ws.send(JSON.stringify(data));
+}
+function broadcast(room,data){
+  room.players.forEach(p=>{ if(p.ws&&!p.disconnected) send(p.ws,data); });
+}
 
 const SUITS=['♠','♥','♦','♣'];
 const RANKS=['A','2','3','4','5','6','7','8','9','10','J','Q','K'];
 const RANK_VAL={A:1,'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'10':10,J:11,Q:12,K:13};
-const SUIT_COLORS={'♠':'#1E293B','♥':'#EF4444','♦':'#EF4444','♣':'#1E293B','*':'#8B5CF6'};
 
+function buildDeck(){
+  const d=[];let i=0;
+  for(const s of SUITS)for(const r of RANKS)d.push({id:`${r}${s}${i++}`,r,s});
+  d.push({id:'JKR',r:'JKR',s:'*'});
+  return d;
+}
+function shuffle(a){
+  const b=[...a];
+  for(let i=b.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    [b[i],b[j]]=[b[j],b[i]];
+  }
+  return b;
+}
 function isJoker(c){return c.r==='JKR';}
-function suitColor(c){return SUIT_COLORS[c.s]||'#1E293B';}
 function isValidSet(cards){
   const n=cards.length;
   if(n<3||n>4)return false;
@@ -40,920 +51,263 @@ function setsComplete(sets){
   const sz=f.map(s=>s.length).sort();
   return sz[0]===3&&sz[1]===3&&sz[2]===4;
 }
-function buildDeck(){
-  const d=[];let i=0;
-  for(const s of SUITS)for(const r of RANKS)d.push({id:`${r}${s}${i++}`,r,s});
-  d.push({id:'JKR',r:'JKR',s:'*'});
-  return d;
+function dealRound(room){
+  const freshDeck=shuffle(buildDeck());
+  room.deck=freshDeck;
+  room.usedPool=[];
+  room.discard=[];
+  const w=room.lastWinner;
+  room.players[0].hand=room.deck.splice(0,w===0?11:10);
+  room.players[1].hand=room.deck.splice(0,w===1?11:10);
+  room.players[0].sets=[null,null,null];
+  room.players[1].sets=[null,null,null];
+  room.turn=w!==null?w:Math.random()<0.5?0:1;
+  room.phase=w!==null?'action':'draw';
+  room.round=(room.round||0)+1;
+  console.log(`Round ${room.round}. Deck:${room.deck.length} P0:${room.players[0].hand.length} P1:${room.players[1].hand.length} turn:${room.turn} phase:${room.phase}`);
 }
-function shuffle(a){
-  const b=[...a];
-  for(let i=b.length-1;i>0;i--){
-    const j=Math.floor(Math.random()*(i+1));
-    [b[i],b[j]]=[b[j],b[i]];
-  }
-  return b;
-}
-
-function Confetti({active}){
-  const particles=useRef(
-    Array.from({length:40},(_,i)=>({
-      x:new Animated.Value(Math.random()*SW),
-      y:new Animated.Value(-20),
-      rot:new Animated.Value(0),
-      color:['#F59E0B','#10B981','#8B5CF6','#EF4444','#3B82F6','#EC4899'][i%6],
-      size:8+Math.random()*8,
-    }))
-  ).current;
-  useEffect(()=>{
-    if(!active)return;
-    particles.forEach((p,i)=>{
-      p.x.setValue(Math.random()*SW);
-      p.y.setValue(-20-Math.random()*100);
-      p.rot.setValue(0);
-      Animated.parallel([
-        Animated.timing(p.y,{toValue:SH+50,duration:2000+Math.random()*1000,delay:i*50,useNativeDriver:true}),
-        Animated.timing(p.rot,{toValue:720,duration:2000+Math.random()*1000,delay:i*50,useNativeDriver:true}),
-      ]).start();
+function sendGameState(room){
+  room.players.forEach((player,idx)=>{
+    if(!player.ws||player.disconnected)return;
+    const opp=room.players[1-idx];
+    send(player.ws,{
+      type:'GAME_STATE',
+      yourHand:player.hand,
+      yourSets:player.sets,
+      oppHandCount:opp.hand.length,
+      oppSetsFours:opp.sets.filter(Boolean).filter(s=>s.length===4).length,
+      oppSetsThrees:opp.sets.filter(Boolean).filter(s=>s.length===3).length,
+      topDiscard:room.discard.length>0?room.discard[room.discard.length-1]:null,
+      deckCount:room.deck.length,
+      turn:room.turn===idx?'yours':'theirs',
+      phase:room.phase,
+      scores:room.scores,
+      totalGames:room.totalGames,
+      round:room.round,
+      yourName:player.name,
+      oppName:opp.name,
     });
-  },[active]);
-  if(!active)return null;
-  return(
-    <View style={StyleSheet.absoluteFill} pointerEvents="none">
-      {particles.map((p,i)=>(
-        <Animated.View key={i} style={{
-          position:'absolute',width:p.size,height:p.size,borderRadius:p.size/4,
-          backgroundColor:p.color,
-          transform:[{translateX:p.x},{translateY:p.y},{rotate:p.rot.interpolate({inputRange:[0,720],outputRange:['0deg','720deg']})}],
-        }}/>
-      ))}
-    </View>
-  );
+  });
 }
-
-function WinOverlay({visible,winner,onDone}){
-  const scale=useRef(new Animated.Value(0)).current;
-  const opacity=useRef(new Animated.Value(0)).current;
-  const trophy=useRef(new Animated.Value(0)).current;
-  useEffect(()=>{
-    if(!visible)return;
-    scale.setValue(0);opacity.setValue(0);trophy.setValue(0);
-    Animated.sequence([
-      Animated.parallel([
-        Animated.spring(scale,{toValue:1,friction:5,tension:100,useNativeDriver:true}),
-        Animated.timing(opacity,{toValue:1,duration:300,useNativeDriver:true}),
-      ]),
-      Animated.spring(trophy,{toValue:1,friction:3,tension:80,useNativeDriver:true}),
-    ]).start();
-    const t=setTimeout(onDone,3500);
-    return()=>clearTimeout(t);
-  },[visible]);
-  if(!visible)return null;
-  const isWin=winner==='you'||winner==='player';
-  const isTie=winner==='tie';
-  return(
-    <Animated.View style={[StyleSheet.absoluteFill,st.winOverlay,{opacity}]} pointerEvents="none">
-      <Confetti active={visible&&isWin}/>
-      <Animated.View style={[st.winCard,{transform:[{scale}]}]}>
-        <Animated.Text style={[st.winTrophy,{transform:[{scale:trophy}]}]}>
-          {isWin?'🏆':isTie?'🤝':'😔'}
-        </Animated.Text>
-        <Text style={[st.winText,{color:isWin?C.gold:isTie?C.textDim:C.red}]}>
-          {isWin?'YOU WIN!':isTie?'TIE!':'YOU LOSE!'}
-        </Text>
-      </Animated.View>
-    </Animated.View>
-  );
-}
-
-function CardDisplay({card,small}){
-  const size=small?{width:38,height:52}:{width:56,height:78};
-  const rankSize=small?11:15;
-  const suitSize=small?13:20;
-  return(
-    <View style={[st.card,size]}>
-      {isJoker(card)?(
-        <><Text style={{fontSize:rankSize+2,fontWeight:'800',color:'#8B5CF6'}}>★</Text><Text style={{fontSize:rankSize-2,color:'#8B5CF6'}}>Joker</Text></>
-      ):(
-        <><Text style={{fontSize:rankSize,fontWeight:'800',color:suitColor(card)}}>{card.r}</Text><Text style={{fontSize:suitSize,color:suitColor(card)}}>{card.s}</Text></>
-      )}
-    </View>
-  );
-}
-
-function CardFace({card,selected,isMove,onPress,onLongPress,small}){
-  const scale=useRef(new Animated.Value(1)).current;
-  useEffect(()=>{
-    Animated.spring(scale,{toValue:selected?1.15:isMove?1.08:1,useNativeDriver:true,friction:6}).start();
-  },[selected,isMove]);
-  const size=small?{width:38,height:52}:{width:56,height:78};
-  const rankSize=small?11:15;
-  const suitSize=small?13:20;
-  return(
-    <TouchableOpacity onPress={onPress} onLongPress={onLongPress} activeOpacity={0.8}>
-      <Animated.View style={[st.card,size,selected&&st.cardSel,isMove&&st.cardMove,{transform:[{scale}]}]}>
-        {isJoker(card)?(
-          <><Text style={{fontSize:rankSize+2,fontWeight:'800',color:'#8B5CF6'}}>★</Text><Text style={{fontSize:rankSize-2,color:'#8B5CF6'}}>Joker</Text></>
-        ):(
-          <><Text style={{fontSize:rankSize,fontWeight:'800',color:suitColor(card)}}>{card.r}</Text><Text style={{fontSize:suitSize,color:suitColor(card)}}>{card.s}</Text></>
-        )}
-      </Animated.View>
-    </TouchableOpacity>
-  );
-}
-
-function CardBack({small}){
-  const size=small?{width:32,height:44}:{width:44,height:62};
-  return(
-    <View style={[st.cardBack,size]}>
-      <View style={st.cardBackInner}><Text style={st.cardBackLogo}>R</Text></View>
-    </View>
-  );
-}
-
-const CHAT_MESSAGES=['👋 Hey!','😂 Lol','😤 Lucky!','🎉 Nice!','😮 Wow!','🤔 Hmm...','👍 GG!','😈 Watch out!','🃏 Let\'s go!','🏆 I\'m winning!'];
-
-export default function App(){
-  const [screen,setScreen]=useState('lobby');
-  const [mode,setMode]=useState(3);
-  const [playerName,setPlayerName]=useState('');
-  const [joinCode,setJoinCode]=useState('');
-  const [roomCode,setRoomCode]=useState('');
-  const [connecting,setConnecting]=useState(false);
-  const [connError,setConnError]=useState('');
-  const [onlineState,setOnlineState]=useState(null);
-  const [localHand,setLocalHand]=useState([]);
-  const [selIds,setSelIds]=useState([]);
-  const [moveIdx,setMoveIdx]=useState(null);
-  const [msg,setMsg]=useState('');
-  const [roundOver,setRoundOver]=useState(null);
-  const [game,setGame]=useState(null);
-  const [chatMsgs,setChatMsgs]=useState([]);
-  const [showChat,setShowChat]=useState(false);
-  const [newMsg,setNewMsg]=useState(false);
-  const [timeLeft,setTimeLeft]=useState(60);
-  const [showRejoin,setShowRejoin]=useState(false);
-  const [lastRoomCode,setLastRoomCode]=useState('');
-  const [lastPlayerName,setLastPlayerName]=useState('');
-  const [winOverlay,setWinOverlay]=useState({visible:false,winner:null});
-  const wsRef=useRef(null);
-  const heartbeatRef=useRef(null);
-  const turnTimerRef=useRef(null);
-  const appState=useRef(AppState.currentState);
-  const titleScale=useRef(new Animated.Value(0)).current;
-  const fadeAnim=useRef(new Animated.Value(0)).current;
-
-  useEffect(()=>{
-    Animated.parallel([
-      Animated.spring(titleScale,{toValue:1,friction:4,useNativeDriver:true}),
-      Animated.timing(fadeAnim,{toValue:1,duration:800,useNativeDriver:true}),
-    ]).start();
-  },[]);
-
-  useEffect(()=>{
-    const sub=AppState.addEventListener('change',next=>{
-      if(appState.current.match(/inactive|background/)&&next==='active'){
-        if(wsRef.current&&wsRef.current.readyState!==WebSocket.OPEN&&lastRoomCode) setShowRejoin(true);
-      }
-      appState.current=next;
+function endRound(room,winnerIdx){
+  if(room.turnTimer) clearTimeout(room.turnTimer);
+  room.lastWinner=winnerIdx;
+  if(winnerIdx!==null)room.scores[winnerIdx]++;
+  const needed=room.totalGames;
+  const seriesOver=room.scores[0]>=needed||room.scores[1]>=needed;
+  const winnerSets=winnerIdx!==null?room.players[winnerIdx].sets:[];
+  room.players.forEach((player,idx)=>{
+    if(!player.ws||player.disconnected)return;
+    const opp=room.players[1-idx];
+    send(player.ws,{
+      type:'ROUND_OVER',
+      winner:winnerIdx===null?'tie':winnerIdx===idx?'you':'opponent',
+      winnerSets,
+      yourSets:player.sets,
+      scores:room.scores,
+      totalGames:room.totalGames,
+      yourName:player.name,
+      oppName:opp.name,
+      seriesOver,
     });
-    return()=>sub.remove();
-  },[lastRoomCode]);
-
-  useEffect(()=>{return()=>{clearAllTimers();closeWS();};},[]);
-
-  const clearAllTimers=()=>{
-    if(heartbeatRef.current)clearInterval(heartbeatRef.current);
-    if(turnTimerRef.current)clearInterval(turnTimerRef.current);
-  };
-  const closeWS=()=>{
-    if(wsRef.current){
-      wsRef.current.onmessage=null;wsRef.current.onclose=null;wsRef.current.onerror=null;
-      try{wsRef.current.close();}catch(e){}
-      wsRef.current=null;
-    }
-    clearAllTimers();
-  };
-  const startTurnTimer=()=>{
-    if(turnTimerRef.current)clearInterval(turnTimerRef.current);
-    setTimeLeft(60);
-    turnTimerRef.current=setInterval(()=>{
-      setTimeLeft(t=>{if(t<=1){clearInterval(turnTimerRef.current);return 0;}return t-1;});
-    },1000);
-  };
-  const stopTurnTimer=()=>{
-    if(turnTimerRef.current)clearInterval(turnTimerRef.current);
-    setTimeLeft(60);
-  };
-
-  const playSound=useCallback((type)=>{
-    try{
-      if(Platform.OS==='web'){
-        const ctx=new (window.AudioContext||window.webkitAudioContext)();
-        const o=ctx.createOscillator();const g=ctx.createGain();
-        o.connect(g);g.connect(ctx.destination);
-        if(type==='win'){
-          o.frequency.setValueAtTime(523,ctx.currentTime);
-          o.frequency.setValueAtTime(659,ctx.currentTime+0.15);
-          o.frequency.setValueAtTime(784,ctx.currentTime+0.3);
-          g.gain.setValueAtTime(0.3,ctx.currentTime);
-          g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.8);
-          o.start(ctx.currentTime);o.stop(ctx.currentTime+0.8);
-        } else if(type==='lose'){
-          o.frequency.setValueAtTime(392,ctx.currentTime);
-          o.frequency.setValueAtTime(349,ctx.currentTime+0.2);
-          o.frequency.setValueAtTime(294,ctx.currentTime+0.4);
-          g.gain.setValueAtTime(0.3,ctx.currentTime);
-          g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.8);
-          o.start(ctx.currentTime);o.stop(ctx.currentTime+0.8);
+  });
+}
+function startTurnTimer(room){
+  if(room.turnTimer) clearTimeout(room.turnTimer);
+  room.turnTimer=setTimeout(()=>{
+    const pidx=room.turn;
+    if(!room.players[pidx]) return;
+    const player=room.players[pidx];
+    if(room.phase==='draw'){
+      room.turn=1-pidx;
+      room.phase='draw';
+      broadcast(room,{type:'TIMES_UP',name:player.name,phase:'draw'});
+      sendGameState(room);
+      startTurnTimer(room);
+    } else if(room.phase==='action'){
+      const hand=player.hand;
+      if(hand.length>0){
+        const jokerIdx=hand.findIndex(c=>isJoker(c));
+        let card;
+        if(hand.length>=11&&jokerIdx>=0){
+          card=hand.splice(jokerIdx,1)[0];
         } else {
-          o.frequency.setValueAtTime(800,ctx.currentTime);
-          g.gain.setValueAtTime(0.1,ctx.currentTime);
-          g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.1);
-          o.start(ctx.currentTime);o.stop(ctx.currentTime+0.1);
+          card=hand.splice(Math.floor(Math.random()*hand.length),1)[0];
         }
+        room.discard.push(card);
       }
-    }catch(e){}
-  },[]);
-
-  const vibrate=useCallback((pattern='light')=>{
-    try{
-      if(Platform.OS==='web')return;
-      if(pattern==='heavy')Vibration.vibrate([0,50,30,50]);
-      else if(pattern==='success')Vibration.vibrate([0,30,20,30,20,30]);
-      else Vibration.vibrate(40);
-    }catch(e){}
-  },[]);
-
-  const showWinAnimation=(winner)=>{
-    setWinOverlay({visible:true,winner});
-    setTimeout(()=>setWinOverlay({visible:false,winner:null}),3600);
-  };
-
-  const connectWS=(onOpen)=>{
-    closeWS();setConnecting(true);setConnError('');
-    try{
-      const ws=new WebSocket(SERVER_URL);
-      wsRef.current=ws;
-      ws.onopen=()=>{
-        setConnecting(false);
-        heartbeatRef.current=setInterval(()=>{
-          if(ws.readyState===WebSocket.OPEN){try{ws.send(JSON.stringify({type:'PING'}));}catch(e){}}
-        },25000);
-        onOpen(ws);
-      };
-      ws.onmessage=(e)=>{try{const d=JSON.parse(e.data);if(d.type==='PONG')return;handleServerMsg(d);}catch(err){}};
-      ws.onerror=()=>{setConnecting(false);setConnError('Connection error.');};
-      ws.onclose=()=>{
-        setConnecting(false);clearInterval(heartbeatRef.current);
-        if(screen==='online-game'||screen==='waiting'){setShowRejoin(true);setMsg('⚠️ Connection lost. Tap Rejoin Game.');}
-      };
-    }catch(e){setConnecting(false);setConnError('Connection failed.');}
-  };
-
-  const handleServerMsg=(data)=>{
-    if(!data||!data.type)return;
-    if(data.type==='ROOM_CREATED'){setRoomCode(data.code);setLastRoomCode(data.code);setScreen('waiting');}
-    else if(data.type==='GAME_START'){
-      setRoundOver(null);setSelIds([]);setMoveIdx(null);setChatMsgs([]);
-      setMsg('Game starting...');stopTurnTimer();setShowRejoin(false);
+      room.turn=1-pidx;
+      room.phase='draw';
+      broadcast(room,{type:'TIMES_UP',name:player.name,phase:'action'});
+      sendGameState(room);
+      startTurnTimer(room);
     }
-    else if(data.type==='GAME_STATE'){
-      setOnlineState(data);
-      setLocalHand(h=>{
-        const sIds=data.yourHand.map(c=>c.id);
-        const kept=h.filter(c=>sIds.includes(c.id));
-        const kIds=kept.map(c=>c.id);
-        const newCards=data.yourHand.filter(c=>!kIds.includes(c.id));
-        return[...kept,...newCards];
-      });
-      if(data.turn==='yours'){
-        setMsg(data.phase==='draw'?'Your turn — tap DECK or DISCARD':'Select cards or discard to end turn');
-        startTurnTimer();vibrate('light');
-      } else {
-        setMsg("Waiting for opponent's move...");stopTurnTimer();
-      }
-      setScreen('online-game');
-    }
-    else if(data.type==='ROUND_OVER'){
-      stopTurnTimer();setRoundOver(data);setSelIds([]);setMoveIdx(null);
-      if(data.winner==='you'){vibrate('success');playSound('win');showWinAnimation('you');}
-      else if(data.winner==='opponent'){vibrate('heavy');playSound('lose');showWinAnimation('opponent');}
-      else showWinAnimation('tie');
-    }
-    else if(data.type==='CHAT'){setChatMsgs(m=>[...m,{text:data.text,isMe:false}]);setNewMsg(true);vibrate('light');}
-    else if(data.type==='TIMES_UP'){
-      const m=data.phase==='draw'?`⏱ Time's up for ${data.name}! They lost their turn.`:`⏱ Time's up for ${data.name}! A card was auto-discarded.`;
-      setMsg(m);setChatMsgs(msgs=>[...msgs,{text:m,isMe:false}]);vibrate('heavy');
-    }
-    else if(data.type==='OPPONENT_DISCONNECTED'){setMsg('⚠️ '+data.name+' disconnected. They have 5 mins to rejoin.');vibrate('heavy');}
-    else if(data.type==='OPPONENT_RECONNECTED'){setMsg('✅ '+data.name+' reconnected!');vibrate('success');}
-    else if(data.type==='ERROR'){setMsg('❌ '+data.msg);setConnError(data.msg);setConnecting(false);}
-  };
-
-  const sendWS=(data)=>{
-    try{
-      if(wsRef.current&&wsRef.current.readyState===WebSocket.OPEN){wsRef.current.send(JSON.stringify(data));}
-      else{setMsg('⚠️ Connection lost. Tap Rejoin Game.');setShowRejoin(true);}
-    }catch(e){setMsg('⚠️ Send failed.');}
-  };
-
-  const createRoom=()=>{
-    if(!playerName.trim()){setConnError('Enter your name first');return;}
-    setLastPlayerName(playerName.trim());
-    connectWS(ws=>{ws.send(JSON.stringify({type:'CREATE_ROOM',name:playerName.trim(),totalGames:mode}));});
-  };
-  const joinRoom=()=>{
-    if(!playerName.trim()){setConnError('Enter your name first');return;}
-    if(!joinCode.trim()){setConnError('Enter a room code');return;}
-    setLastPlayerName(playerName.trim());setLastRoomCode(joinCode.trim().toUpperCase());
-    connectWS(ws=>{ws.send(JSON.stringify({type:'JOIN_ROOM',code:joinCode.trim().toUpperCase(),name:playerName.trim()}));});
-  };
-  const rejoinGame=()=>{
-    if(!lastRoomCode||!lastPlayerName){setConnError('No previous game found.');return;}
-    connectWS(ws=>{ws.send(JSON.stringify({type:'REJOIN',code:lastRoomCode,name:lastPlayerName}));});
-  };
-  const takeDiscard=()=>{vibrate('light');playSound('card');sendWS({type:'TAKE_DISCARD'});};
-  const tapCard=(id)=>{
-    if(!onlineState||onlineState.turn!=='yours'||onlineState.phase!=='action')return;
-    vibrate('light');playSound('card');
-    setSelIds(s=>s.includes(id)?s.filter(x=>x!==id):[...s,id]);
-  };
-  const longPressCard=(idx)=>{vibrate('light');setMoveIdx(m=>m===idx?null:idx);};
-  const moveLeft=()=>{
-    if(moveIdx===null||moveIdx===0)return;vibrate('light');
-    setLocalHand(h=>{const n=[...h];[n[moveIdx],n[moveIdx-1]]=[n[moveIdx-1],n[moveIdx]];return n;});
-    setMoveIdx(m=>m-1);
-  };
-  const moveRight=()=>{
-    if(moveIdx===null||moveIdx>=localHand.length-1)return;vibrate('light');
-    setLocalHand(h=>{const n=[...h];[n[moveIdx],n[moveIdx+1]]=[n[moveIdx+1],n[moveIdx]];return n;});
-    setMoveIdx(m=>m+1);
-  };
-
-  // ── AI GAME ──
-  const startAiGame=(prev)=>{
-    const fresh=shuffle(buildDeck());
-    const winner=prev?prev.roundWinner:null;
-    const playerHand=fresh.splice(0,winner==='player'?11:10);
-    const aiHand=fresh.splice(0,winner==='ai'?11:10);
-    const starter=winner||(Math.random()<0.5?'player':'ai');
-    // Winner starts in action phase with 11 cards — must discard first
-    const startPhase=winner?'action':'draw';
-    const g={deck:fresh,discard:[],playerHand,aiHand,
-      playerSets:[null,null,null],aiSets:[null,null,null],
-      scores:prev?prev.scores:{player:0,ai:0},
-      totalGames:prev?prev.totalGames:mode,
-      currentRound:prev?prev.currentRound+1:1,
-      turn:starter,phase:startPhase,selIds:[],moveIdx:null,roundWinner:null,
-      msg:starter==='player'
-        ?(startPhase==='action'?'You won last round — discard a card to start!':'Your turn — tap DECK or DISCARD')
-        :'Opponent goes first...'
-    };
-    setGame(g);setScreen('ai-game');
-    if(starter==='ai')setTimeout(()=>doAiTurn(g),1200);
-  };
-
-  const doAiTurn=(initial)=>{
-    setGame(g=>{
-      const cur=g||initial;
-      if(!cur||cur.turn!=='ai')return cur;
-      let deck=[...cur.deck],discard=[...cur.discard],aiHand=[...cur.aiHand],aiSets=[...cur.aiSets];
-      // If AI has 11 cards (won last round) just discard first
-      if(cur.phase==='action'&&aiHand.length===11){
-        const jokerIdx=aiHand.findIndex(c=>isJoker(c));
-        const card=jokerIdx>=0?aiHand.splice(jokerIdx,1)[0]:aiHand.splice(Math.floor(Math.random()*aiHand.length),1)[0];
-        discard.push(card);
-        return{...cur,aiHand,deck,discard,turn:'player',phase:'draw',selIds:[],moveIdx:null,msg:'Your turn — tap DECK or DISCARD'};
-      }
-      if(discard.length>0&&Math.random()<0.4)aiHand.push(discard.pop());
-      else if(deck.length>0)aiHand.push(deck.shift());
-      else return{...cur,turn:'done',roundWinner:null,msg:"It's a tie!"};
-      for(const size of[4,3,3]){
-        const f=aiSets.filter(Boolean);
-        if(size===4&&f.filter(s=>s.length===4).length>=1)continue;
-        if(size===3&&f.filter(s=>s.length===3).length>=2)continue;
-        const jokers=aiHand.filter(c=>isJoker(c));
-        const byRank={};
-        aiHand.filter(c=>!isJoker(c)).forEach(c=>{if(!byRank[c.r])byRank[c.r]=[];byRank[c.r].push(c);});
-        for(const r in byRank){
-          let set=null;
-          if(byRank[r].length>=size)set=byRank[r].slice(0,size);
-          else if(byRank[r].length===size-1&&jokers.length>0)set=[...byRank[r],jokers[0]];
-          if(set){const slot=aiSets.findIndex(s=>s===null);if(slot>=0){aiSets[slot]=set;aiHand=aiHand.filter(c=>!set.some(s=>s.id===c.id));break;}}
-        }
-      }
-      if(setsComplete(aiSets)){playSound('lose');showWinAnimation('opponent');return{...cur,aiHand,aiSets,deck,discard,scores:{...cur.scores,ai:cur.scores.ai+1},turn:'done',roundWinner:'ai',msg:'AI wins!'};}
-      if(aiHand.length>0)discard.push(aiHand.splice(Math.floor(Math.random()*aiHand.length),1)[0]);
-      return{...cur,aiHand,aiSets,deck,discard,turn:'player',phase:'draw',selIds:[],moveIdx:null,msg:'Your turn — tap DECK or DISCARD'};
-    });
-  };
-
-  const aiTapDeck=()=>{vibrate('light');playSound('card');setGame(g=>{if(!g||g.turn!=='player'||g.phase!=='draw'||g.deck.length===0)return g;const card=g.deck[0];return{...g,deck:g.deck.slice(1),playerHand:[...g.playerHand,card],phase:'action',selIds:[],moveIdx:null,msg:'Card drawn!'};});};
-  const aiTakeDiscard=()=>{vibrate('light');playSound('card');setGame(g=>{if(!g||g.turn!=='player'||g.phase!=='draw'||g.discard.length===0)return g;const card=g.discard[g.discard.length-1];return{...g,discard:g.discard.slice(0,-1),playerHand:[...g.playerHand,card],phase:'action',selIds:[],moveIdx:null,msg:'Took discard!'};});};
-  const aiTapCard=(id)=>{vibrate('light');playSound('card');setGame(g=>{if(!g||g.turn!=='player'||g.phase!=='action')return g;const already=g.selIds.includes(id);return{...g,selIds:already?g.selIds.filter(x=>x!==id):[...g.selIds,id]};});};
-  const aiLongPress=(idx)=>{vibrate('light');setGame(g=>{if(!g)return g;return{...g,moveIdx:g.moveIdx===idx?null:idx};});};
-  const aiDeclareSet=(size)=>{vibrate('success');setGame(g=>{if(!g)return g;const cards=g.playerHand.filter(c=>g.selIds.includes(c.id));if(cards.length!==size)return{...g,msg:`Select exactly ${size} cards`};if(!isValidSet(cards))return{...g,msg:'❌ Invalid set!'};const f=g.playerSets.filter(Boolean);if(size===4&&f.filter(s=>s.length===4).length>=1)return{...g,msg:'Already have set of 4!'};if(size===3&&f.filter(s=>s.length===3).length>=2)return{...g,msg:'Already have 2 sets of 3!'};const newSets=[...g.playerSets];let slot=-1;if(size===4){slot=newSets[0]===null?0:newSets.findIndex(s=>s===null);}else{const hasFour=newSets.some(s=>s&&s.length===4);if(!hasFour){slot=newSets.findIndex((s,i)=>s===null&&i>0);if(slot===-1)slot=newSets.findIndex(s=>s===null);}else slot=newSets.findIndex(s=>s===null);}if(slot<0)return{...g,msg:'All slots full!'};newSets[slot]=cards;const newHand=g.playerHand.filter(c=>!g.selIds.includes(c.id));const done=setsComplete(newSets);return{...g,playerSets:newSets,playerHand:newHand,selIds:[],moveIdx:null,msg:done?'🎉 All sets done! Press Declare Win!':`Set of ${size} locked in!`};});};
-  const aiUndoSet=(idx)=>{setGame(g=>{if(!g||!g.playerSets[idx])return g;const set=g.playerSets[idx];const newSets=[...g.playerSets];newSets[idx]=null;return{...g,playerSets:newSets,playerHand:[...g.playerHand,...set],msg:'Set returned to hand.'};});};
-  const aiDiscard=()=>{vibrate('light');playSound('card');setGame(g=>{if(!g||g.selIds.length!==1||g.phase!=='action')return g;const id=g.selIds[0];const card=g.playerHand.find(c=>c.id===id);if(!card)return g;return{...g,playerHand:g.playerHand.filter(c=>c.id!==id),discard:[...g.discard,card],selIds:[],moveIdx:null,turn:'ai',phase:'draw',msg:"Opponent's turn..."};});setTimeout(doAiTurn,1200);};
-  const aiDeclareWin=()=>{vibrate('success');playSound('win');showWinAnimation('player');setGame(g=>{if(!g||!setsComplete(g.playerSets))return g;return{...g,scores:{...g.scores,player:g.scores.player+1},turn:'done',roundWinner:'player',msg:'You win!'};});};
-
-  const renderHand=(hand,onTap,onLong,selIdsVal,moveIdxVal,canSelect)=>(
-    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-      <View style={st.handRow}>
-        {hand.map((c,idx)=>(
-          <CardFace key={c.id} card={c}
-            selected={selIdsVal.includes(c.id)}
-            isMove={moveIdxVal===idx}
-            onPress={()=>{if(canSelect)onTap(c.id);}}
-            onLongPress={()=>onLong(idx)}
-          />
-        ))}
-      </View>
-    </ScrollView>
-  );
-
-  const renderMoveButtons=(hand,moveIdxVal,onLeft,onRight,onCancel)=>(
-    <View style={[st.row,{marginTop:8,gap:6,flexWrap:'wrap'}]}>
-      <Text style={st.dimT}>Long-press then move:</Text>
-      <TouchableOpacity style={[st.movBtn,(moveIdxVal===null||moveIdxVal===0)&&{opacity:0.3}]} onPress={onLeft}><Text style={st.movBtnT}>◀</Text></TouchableOpacity>
-      <TouchableOpacity style={[st.movBtn,(moveIdxVal===null||moveIdxVal>=hand.length-1)&&{opacity:0.3}]} onPress={onRight}><Text style={st.movBtnT}>▶</Text></TouchableOpacity>
-      {moveIdxVal!==null&&<TouchableOpacity style={st.movBtnX} onPress={onCancel}><Text style={st.movBtnT}>✕</Text></TouchableOpacity>}
-    </View>
-  );
-
-  const renderSets=(sets,onUndo)=>(
-    <View style={st.setsZone}>
-      <Text style={st.setsTitle}>YOUR SETS <Text style={{fontWeight:'400',fontSize:10,color:C.textFaint}}>(hidden from opponent)</Text></Text>
-      {[{label:'Set of 4'},{label:'Set of 3'},{label:'Set of 3'}].map((slot,i)=>(
-        <View key={i} style={[st.setSlot,sets[i]&&st.setSlotOn]}>
-          <View style={st.row}>
-            <Text style={st.setSlotLbl}>{slot.label} {sets[i]?'✓':''}</Text>
-            {sets[i]&&<TouchableOpacity style={st.undoBtn} onPress={()=>onUndo(i)}><Text style={st.undoBtnT}>↩ Undo</Text></TouchableOpacity>}
-          </View>
-          {sets[i]?(
-            <View style={[st.row,{flexWrap:'wrap',gap:4,marginTop:6}]}>
-              {sets[i].map(c=><CardDisplay key={c.id} card={c} small/>)}
-            </View>
-          ):(
-            <Text style={[st.dimT,{marginTop:6}]}>— empty — select cards then declare —</Text>
-          )}
-        </View>
-      ))}
-    </View>
-  );
-
-  const renderRoundOver=(winner,scores,yourName,oppName,needed,onNext,onRematch,onLeave,winnerSets)=>(
-    <View style={st.roundOverZone}>
-      <Text style={st.roundOverEmoji}>{winner==='player'||winner==='you'?'🏆':winner==='tie'?'🤝':'😔'}</Text>
-      <Text style={st.roundOverTitle}>{winner==='you'||winner==='player'?'You win the round!':winner==='tie'?'It\'s a tie!':'You lose the round!'}</Text>
-      {winnerSets&&winnerSets.filter(Boolean).length>0&&(
-        <View style={{marginBottom:12,width:'100%'}}>
-          <Text style={st.revealTitle}>{winner==='you'||winner==='player'?'✨ Your winning sets:':'🏆 Opponent\'s winning sets:'}</Text>
-          {winnerSets.filter(Boolean).map((set,i)=>(
-            <View key={i} style={{marginBottom:8}}>
-              <Text style={st.dimT}>{set.length===4?'Set of 4':'Set of 3'}:</Text>
-              <View style={[st.row,{flexWrap:'wrap',gap:4,marginTop:4}]}>{set.map(c=><CardDisplay key={c.id} card={c} small/>)}</View>
-            </View>
-          ))}
-        </View>
-      )}
-      <View style={[st.row,{justifyContent:'center',gap:16,marginBottom:12}]}>
-        <View style={st.scoreBox}><Text style={st.scoreBoxN}>{scores[0]}</Text><Text style={st.scoreBoxL}>{yourName}</Text></View>
-        <Text style={{fontSize:20,color:C.textFaint}}>–</Text>
-        <View style={st.scoreBox}><Text style={st.scoreBoxN}>{scores[1]}</Text><Text style={st.scoreBoxL}>{oppName}</Text></View>
-      </View>
-      <Text style={st.dimT}>First to {needed} wins the match</Text>
-      {scores[0]>=needed||scores[1]>=needed?(
-        <View style={{marginTop:12,width:'100%'}}>
-          <Text style={[st.seriesWinner,{marginBottom:12}]}>{scores[0]>scores[1]?'🏆 You win the match!':scores[1]>scores[0]?'😔 Opponent wins the match!':'🤝 Match tied!'}</Text>
-          {onRematch&&<TouchableOpacity style={[st.btnDeclare,{marginBottom:8,backgroundColor:C.purple}]} onPress={onRematch}><Text style={st.btnDeclareT}>🔄 Play Again</Text></TouchableOpacity>}
-        </View>
-      ):(
-        <TouchableOpacity style={[st.btnDeclare,{marginBottom:8,marginTop:12}]} onPress={onNext}><Text style={st.btnDeclareT}>Next Round ▶</Text></TouchableOpacity>
-      )}
-      <TouchableOpacity style={st.btnOutline} onPress={onLeave}><Text style={st.btnOutlineT}>Leave Game</Text></TouchableOpacity>
-    </View>
-  );
-
-  const renderRejoinBanner=()=>(
-    showRejoin&&lastRoomCode?(
-      <View style={st.rejoinBanner}>
-        <Text style={st.rejoinTitle}>⚠️ Disconnected from game</Text>
-        <Text style={st.rejoinSub}>Room: <Text style={{color:C.gold,fontWeight:'700'}}>{lastRoomCode}</Text></Text>
-        {connecting?<ActivityIndicator color={C.gold} style={{marginTop:8}}/>:(
-          <TouchableOpacity style={[st.btnGold,{marginTop:8}]} onPress={rejoinGame}><Text style={st.btnGoldT}>🔄 Rejoin Game</Text></TouchableOpacity>
-        )}
-        <TouchableOpacity onPress={()=>setShowRejoin(false)}><Text style={[st.dimT,{textAlign:'center',marginTop:8}]}>Dismiss</Text></TouchableOpacity>
-      </View>
-    ):null
-  );
-
-  // ── LOBBY ──
-  if(screen==='lobby') return(
-    <SafeAreaView style={st.bg}>
-      <ScrollView contentContainerStyle={st.lobby}>
-        <Animated.View style={{transform:[{scale:titleScale}],opacity:fadeAnim,alignItems:'center',marginBottom:28}}>
-          <Text style={st.lobbyTitle}>🃏 RUMIKI</Text>
-          <Text style={st.lobbySub}>The ultimate card game</Text>
-        </Animated.View>
-        {renderRejoinBanner()}
-        <View style={st.lobbyCard}>
-          <Text style={st.label}>YOUR NAME</Text>
-          <TextInput style={st.input} placeholder="Enter your name" placeholderTextColor={C.textFaint} value={playerName} onChangeText={setPlayerName} maxLength={12}/>
-          <Text style={st.label}>GAME MODE</Text>
-          <View style={st.modeRow}>
-            {[3,5,10].map(m=>(
-              <TouchableOpacity key={m} style={[st.pill,mode===m&&st.pillOn]} onPress={()=>{vibrate();setMode(m);}}>
-                <Text style={[st.pillT,mode===m&&st.pillTOn]}>First to {m}</Text>
-                <Text style={[st.pillS,mode===m&&st.pillSOn]}>{m} wins</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-        {connError?<Text style={st.errT}>{connError}</Text>:null}
-        {connecting?<ActivityIndicator color={C.gold} style={{marginBottom:12}}/>:null}
-        <Text style={st.sectionHead}>🌐 ONLINE MULTIPLAYER</Text>
-        <TouchableOpacity style={st.btnGold} onPress={()=>{vibrate();createRoom();}}><Text style={st.btnGoldT}>➕ Create Room</Text></TouchableOpacity>
-        <Text style={st.label}>JOIN WITH CODE</Text>
-        <View style={[st.row,{marginBottom:16}]}>
-          <TextInput style={[st.input,{flex:1,marginBottom:0}]} placeholder="Room code" placeholderTextColor={C.textFaint} value={joinCode} onChangeText={t=>setJoinCode(t.toUpperCase())} maxLength={4} autoCapitalize="characters"/>
-          <TouchableOpacity style={[st.btnGold,{marginBottom:0,marginLeft:8,paddingHorizontal:20,paddingVertical:15}]} onPress={()=>{vibrate();joinRoom();}}><Text style={st.btnGoldT}>Join</Text></TouchableOpacity>
-        </View>
-        <View style={st.divRow}><View style={st.divLine}/><Text style={st.divT}>or</Text><View style={st.divLine}/></View>
-        <Text style={st.sectionHead}>🤖 PLAY VS AI</Text>
-        <TouchableOpacity style={st.btnOutline} onPress={()=>{vibrate();startAiGame(null);}}><Text style={st.btnOutlineT}>🎮 Play vs AI</Text></TouchableOpacity>
-        <TouchableOpacity style={st.btnOutline} onPress={()=>setScreen('rules')}><Text style={st.btnOutlineT}>ℹ️ How to Play</Text></TouchableOpacity>
-      </ScrollView>
-    </SafeAreaView>
-  );
-
-  // ── WAITING ──
-  if(screen==='waiting') return(
-    <SafeAreaView style={st.bg}>
-      <View style={st.waiting}>
-        <Text style={st.lobbyTitle}>🃏 RUMIKI</Text>
-        <Text style={st.waitSub}>Share this code:</Text>
-        <View style={st.codeBox}><Text style={st.codeText}>{roomCode}</Text></View>
-        <ActivityIndicator color={C.gold} size="large" style={{marginTop:24}}/>
-        <Text style={st.waitMsg}>Waiting for opponent...</Text>
-        <TouchableOpacity style={[st.btnOutline,{marginTop:32}]} onPress={()=>{closeWS();setScreen('lobby');}}><Text style={st.btnOutlineT}>Cancel</Text></TouchableOpacity>
-      </View>
-    </SafeAreaView>
-  );
-
-  // ── RULES ──
-  if(screen==='rules') return(
-    <SafeAreaView style={st.bg}>
-      <ScrollView contentContainerStyle={st.lobby}>
-        <Text style={st.lobbyTitle}>How to Play</Text>
-        {[
-          ['🎯 Goal','Complete 3 sets: 1 set of 4 cards AND 2 sets of 3 cards, then declare win.'],
-          ['🃏 Deck','52 cards + 1 Joker. Each player gets 10 cards. Winner of each round gets 11 cards next round but must discard first.'],
-          ['🔄 Your Turn','1. Tap DECK or DISCARD to draw.\n2. Tap cards to select for sets.\n3. Declare sets anytime.\n4. Tap 1 card then Discard to end turn.'],
-          ['✅ Valid Sets','Same rank (e.g. K♠ K♥ K♦) OR same suit consecutive (e.g. 3♥ 4♥ 5♥). Joker fills any gap.'],
-          ['🏆 Winning','Fill all 3 slots (1×4 + 2×3) then tap Declare Win. Only winner\'s sets are revealed!'],
-          ['↩ Undo','Tap Undo on any set to return cards to hand.'],
-          ['📦 Move','Long-press a card then use ◀ ▶ to reorder anytime.'],
-          ['💬 Chat','Tap Chat during online games to send quick messages.'],
-          ['🔄 Rejoin','If you lose connection tap Rejoin Game on the lobby screen.'],
-          ['⏱ Timer','60 seconds per turn. Draw timeout = lose turn. Action timeout = random card discarded.'],
-          ['🏅 Match','Choose First to 3, 5 or 10 wins. First player to reach that number wins the match!'],
-        ].map(([t,b])=>(
-          <View key={t} style={st.ruleCard}><Text style={st.ruleT}>{t}</Text><Text style={st.ruleB}>{b}</Text></View>
-        ))}
-        <TouchableOpacity style={st.btnGold} onPress={()=>setScreen('lobby')}><Text style={st.btnGoldT}>Got it! Let's play 🃏</Text></TouchableOpacity>
-      </ScrollView>
-    </SafeAreaView>
-  );
-
-  // ── ONLINE GAME ──
-  if(screen==='online-game'&&onlineState){
-    const o=onlineState;
-    const isMyTurn=o.turn==='yours';
-    const inDraw=isMyTurn&&o.phase==='draw';
-    const inAction=isMyTurn&&o.phase==='action';
-    const topD=o.topDiscard;
-    const myFours=o.yourSets.filter(Boolean).filter(s=>s.length===4).length;
-    const myThrees=o.yourSets.filter(Boolean).filter(s=>s.length===3).length;
-    const sel=selIds.length;
-    const needed=o.totalGames;
-    const timerColor=timeLeft<=10?C.red:timeLeft<=20?C.gold:C.green;
-
-    return(
-      <SafeAreaView style={st.bg}>
-        <WinOverlay visible={winOverlay.visible} winner={winOverlay.winner} onDone={()=>setWinOverlay({visible:false,winner:null})}/>
-        <ScrollView contentContainerStyle={st.gameWrap}>
-          {renderRejoinBanner()}
-          <View style={st.header}>
-            <View style={st.scoreItem}><Text style={st.scoreN}>{o.scores[0]}</Text><Text style={st.scoreLb}>{o.yourName}</Text></View>
-            <View style={{alignItems:'center'}}>
-              <Text style={st.gameTitle}>RUMIKI</Text>
-              <Text style={st.roundBadge}>First to {needed} wins</Text>
-              {isMyTurn&&<View style={[st.timerBadge,{backgroundColor:timerColor+'33',borderColor:timerColor}]}><Text style={[st.timerText,{color:timerColor}]}>⏱ {timeLeft}s</Text></View>}
-            </View>
-            <View style={st.scoreItem}><Text style={st.scoreN}>{o.scores[1]}</Text><Text style={st.scoreLb}>{o.oppName}</Text></View>
-          </View>
-
-          <View style={st.oppZone}>
-            <View style={st.row}>
-              <Text style={st.oppTitle}>{o.oppName}</Text>
-              {!isMyTurn&&<View style={st.thinkingBadge}><Text style={st.thinkingText}>🟡 Their turn...</Text></View>}
-              <Text style={st.dimT}>{o.oppHandCount} cards</Text>
-            </View>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              <View style={st.handRow}>{Array(Math.min(o.oppHandCount,13)).fill(0).map((_,i)=><CardBack key={i} small/>)}</View>
-            </ScrollView>
-            <View style={[st.row,{marginTop:8,gap:6}]}>
-              <View style={[st.badge,o.oppSetsFours>=1&&st.badgeDone]}><Text style={st.badgeT}>{o.oppSetsFours>=1?'✓ ':''}Set of 4</Text></View>
-              <View style={[st.badge,o.oppSetsThrees>=2&&st.badgeDone,o.oppSetsThrees===1&&st.badgeHalf]}><Text style={st.badgeT}>{o.oppSetsThrees}/2 Sets of 3</Text></View>
-            </View>
-          </View>
-
-          <View style={[st.row,{gap:10,marginBottom:10,alignItems:'flex-start'}]}>
-            <View style={{alignItems:'center'}}>
-              <Text style={st.pileLabel}>DECK</Text>
-              <TouchableOpacity style={[st.deckPile,inDraw&&st.pileGlow]} onPress={()=>{if(!inDraw)return;vibrate();playSound('card');sendWS({type:'DRAW_DECK'});}}>
-                <CardBack/><View style={st.deckCount}><Text style={st.deckCountText}>{o.deckCount}</Text></View>
-              </TouchableOpacity>
-              {inDraw&&<Text style={st.tapHint}>tap to draw</Text>}
-            </View>
-            <View style={{alignItems:'center'}}>
-              <Text style={st.pileLabel}>DISCARD</Text>
-              {topD?(
-                <TouchableOpacity style={[st.discardPile,inDraw&&st.pileGlow]} activeOpacity={0.7} onPress={()=>{if(!inDraw)return;takeDiscard();}}>
-                  <CardDisplay card={topD}/>
-                </TouchableOpacity>
-              ):(
-                <View style={st.emptyPile}><Text style={st.dimT}>empty</Text></View>
-              )}
-              {inDraw&&topD&&<Text style={st.tapHint}>tap to take</Text>}
-            </View>
-            <View style={st.msgBox}><Text style={st.msgText}>{msg}</Text></View>
-          </View>
-
-          <View style={st.playerZone}>
-            <View style={st.row}>
-              <Text style={st.playerTitle}>Your Hand ({localHand.length})</Text>
-              {isMyTurn&&<View style={st.yourTurnBadge}><Text style={st.yourTurnText}>YOUR TURN</Text></View>}
-            </View>
-            <Text style={st.dimT}>Tap = select · Long-press = move (anytime)</Text>
-            {renderHand(localHand,tapCard,longPressCard,selIds,moveIdx,inAction)}
-            {renderMoveButtons(localHand,moveIdx,moveLeft,moveRight,()=>setMoveIdx(null))}
-            {sel>0&&<Text style={st.selInfo}>{sel} selected{sel===3?' — ready for Set of 3':sel===4?' — ready for Set of 4':sel===1?' — discard to end turn':''}</Text>}
-            <View style={{marginTop:10,gap:8}}>
-              {inAction&&sel===4&&myFours<1&&<TouchableOpacity style={st.btnDeclare} onPress={()=>{vibrate('success');sendWS({type:'DECLARE_SET',cardIds:selIds,setSize:4});setSelIds([]);}}><Text style={st.btnDeclareT}>✓ Declare Set of 4</Text></TouchableOpacity>}
-              {inAction&&sel===3&&myThrees<2&&<TouchableOpacity style={st.btnDeclare} onPress={()=>{vibrate('success');sendWS({type:'DECLARE_SET',cardIds:selIds,setSize:3});setSelIds([]);}}><Text style={st.btnDeclareT}>✓ Declare Set of 3</Text></TouchableOpacity>}
-              {inAction&&sel===1&&<TouchableOpacity style={st.btnDiscard} onPress={()=>{vibrate('light');playSound('card');sendWS({type:'DISCARD_CARD',cardId:selIds[0]});setSelIds([]);setMoveIdx(null);stopTurnTimer();}}><Text style={st.btnDiscardT}>Discard &amp; End Turn</Text></TouchableOpacity>}
-              {inAction&&setsComplete(o.yourSets)&&<TouchableOpacity style={st.btnWin} onPress={()=>{vibrate('success');playSound('win');sendWS({type:'DECLARE_WIN'});stopTurnTimer();}}><Text style={st.btnWinT}>🏆 Declare Win!</Text></TouchableOpacity>}
-            </View>
-            {sel>0&&<TouchableOpacity onPress={()=>setSelIds([])}><Text style={{fontSize:11,color:C.textFaint,textAlign:'center',marginTop:6}}>✕ Clear selection</Text></TouchableOpacity>}
-          </View>
-
-          {renderSets(o.yourSets,(i)=>sendWS({type:'UNDO_SET',slotIdx:i}))}
-
-          <View style={st.chatZone}>
-            <TouchableOpacity style={st.chatToggle} onPress={()=>{setShowChat(s=>!s);setNewMsg(false);}}>
-              <Text style={st.chatToggleT}>💬 Chat {newMsg&&!showChat?'🔴':''}</Text>
-            </TouchableOpacity>
-            {showChat&&(
-              <>
-                <View style={st.chatMsgs}>
-                  {chatMsgs.length===0?<Text style={[st.dimT,{textAlign:'center',padding:8}]}>No messages yet</Text>:chatMsgs.map((m,i)=>(
-                    <View key={i} style={[st.bubble,m.isMe?st.bubbleMe:st.bubbleThem]}>
-                      <Text style={[st.bubbleText,m.isMe&&{color:'#1C1917'}]}>{m.text}</Text>
-                    </View>
-                  ))}
-                </View>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                  <View style={st.quickMsgs}>
-                    {CHAT_MESSAGES.map(m=>(
-                      <TouchableOpacity key={m} style={st.quickMsg} onPress={()=>{vibrate('light');sendWS({type:'CHAT',text:m});setChatMsgs(msgs=>[...msgs,{text:m,isMe:true}]);}}>
-                        <Text style={st.quickMsgT}>{m}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                </ScrollView>
-              </>
-            )}
-          </View>
-
-          {roundOver&&renderRoundOver(
-            roundOver.winner,roundOver.scores,roundOver.yourName,roundOver.oppName,needed,
-            ()=>sendWS({type:'NEXT_ROUND'}),
-            ()=>sendWS({type:'NEXT_ROUND'}),
-            ()=>{closeWS();setScreen('lobby');},
-            roundOver.winnerSets
-          )}
-        </ScrollView>
-      </SafeAreaView>
-    );
-  }
-
-  // ── AI GAME ──
-  if(screen==='ai-game'&&game){
-    const g=game;
-    const needed=g.totalGames;
-    const isMyTurn=g.turn==='player';
-    const inAction=isMyTurn&&g.phase==='action';
-    const inDraw=isMyTurn&&g.phase==='draw';
-    const topD=g.discard.length>0?g.discard[g.discard.length-1]:null;
-    const myFours=g.playerSets.filter(Boolean).filter(s=>s.length===4).length;
-    const myThrees=g.playerSets.filter(Boolean).filter(s=>s.length===3).length;
-    const sel=g.selIds.length;
-    const isRoundOver=g.turn==='done';
-
-    return(
-      <SafeAreaView style={st.bg}>
-        <WinOverlay visible={winOverlay.visible} winner={winOverlay.winner} onDone={()=>setWinOverlay({visible:false,winner:null})}/>
-        <ScrollView contentContainerStyle={st.gameWrap}>
-          <View style={st.header}>
-            <View style={st.scoreItem}><Text style={st.scoreN}>{g.scores.player}</Text><Text style={st.scoreLb}>You</Text></View>
-            <View style={{alignItems:'center'}}><Text style={st.gameTitle}>RUMIKI</Text><Text style={st.roundBadge}>First to {needed} wins</Text></View>
-            <View style={st.scoreItem}><Text style={st.scoreN}>{g.scores.ai}</Text><Text style={st.scoreLb}>AI</Text></View>
-          </View>
-          <View style={st.oppZone}>
-            <View style={st.row}>
-              <Text style={st.oppTitle}>AI Opponent</Text>
-              {g.turn==='ai'&&<View style={st.thinkingBadge}><Text style={st.thinkingText}>🟡 Thinking...</Text></View>}
-              <Text style={st.dimT}>{g.aiHand.length} cards</Text>
-            </View>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              <View style={st.handRow}>{g.aiHand.map(c=><CardBack key={c.id} small/>)}</View>
-            </ScrollView>
-            <View style={[st.row,{marginTop:8,gap:6}]}>
-              {(()=>{const af=g.aiSets.filter(Boolean);const af4=af.filter(s=>s.length===4).length;const af3=af.filter(s=>s.length===3).length;return(<><View style={[st.badge,af4>=1&&st.badgeDone]}><Text style={st.badgeT}>{af4>=1?'✓ ':''}Set of 4</Text></View><View style={[st.badge,af3>=2&&st.badgeDone,af3===1&&st.badgeHalf]}><Text style={st.badgeT}>{af3}/2 Sets of 3</Text></View></>);})()}
-            </View>
-          </View>
-          <View style={[st.row,{gap:10,marginBottom:10,alignItems:'flex-start'}]}>
-            <View style={{alignItems:'center'}}>
-              <Text style={st.pileLabel}>DECK</Text>
-              <TouchableOpacity style={[st.deckPile,inDraw&&st.pileGlow]} onPress={aiTapDeck}>
-                <CardBack/><View style={st.deckCount}><Text style={st.deckCountText}>{g.deck.length}</Text></View>
-              </TouchableOpacity>
-              {inDraw&&<Text style={st.tapHint}>tap to draw</Text>}
-            </View>
-            <View style={{alignItems:'center'}}>
-              <Text style={st.pileLabel}>DISCARD</Text>
-              {topD?(
-                <TouchableOpacity style={[st.discardPile,inDraw&&st.pileGlow]} activeOpacity={0.7} onPress={aiTakeDiscard}>
-                  <CardDisplay card={topD}/>
-                </TouchableOpacity>
-              ):(
-                <View style={st.emptyPile}><Text style={st.dimT}>empty</Text></View>
-              )}
-              {inDraw&&topD&&<Text style={st.tapHint}>tap to take</Text>}
-            </View>
-            <View style={st.msgBox}><Text style={st.msgText}>{g.msg}</Text></View>
-          </View>
-          <View style={st.playerZone}>
-            <View style={st.row}>
-              <Text style={st.playerTitle}>Your Hand ({g.playerHand.length})</Text>
-              {isMyTurn&&<View style={st.yourTurnBadge}><Text style={st.yourTurnText}>YOUR TURN</Text></View>}
-            </View>
-            <Text style={st.dimT}>Tap = select · Long-press = move (anytime)</Text>
-            {renderHand(g.playerHand,aiTapCard,aiLongPress,g.selIds,g.moveIdx,inAction)}
-            {renderMoveButtons(g.playerHand,g.moveIdx,
-              ()=>setGame(gg=>{if(!gg||gg.moveIdx===null||gg.moveIdx===0)return gg;const h=[...gg.playerHand];[h[gg.moveIdx],h[gg.moveIdx-1]]=[h[gg.moveIdx-1],h[gg.moveIdx]];return{...gg,playerHand:h,moveIdx:gg.moveIdx-1};}),
-              ()=>setGame(gg=>{if(!gg||gg.moveIdx===null||gg.moveIdx>=gg.playerHand.length-1)return gg;const h=[...gg.playerHand];[h[gg.moveIdx],h[gg.moveIdx+1]]=[h[gg.moveIdx+1],h[gg.moveIdx]];return{...gg,playerHand:h,moveIdx:gg.moveIdx+1};}),
-              ()=>setGame(g=>({...g,moveIdx:null}))
-            )}
-            {sel>0&&<Text style={st.selInfo}>{sel} selected{sel===3?' — ready for Set of 3':sel===4?' — ready for Set of 4':sel===1?' — discard to end turn':''}</Text>}
-            <View style={{marginTop:10,gap:8}}>
-              {inAction&&sel===4&&myFours<1&&<TouchableOpacity style={st.btnDeclare} onPress={()=>aiDeclareSet(4)}><Text style={st.btnDeclareT}>✓ Declare Set of 4</Text></TouchableOpacity>}
-              {inAction&&sel===3&&myThrees<2&&<TouchableOpacity style={st.btnDeclare} onPress={()=>aiDeclareSet(3)}><Text style={st.btnDeclareT}>✓ Declare Set of 3</Text></TouchableOpacity>}
-              {inAction&&sel===1&&<TouchableOpacity style={st.btnDiscard} onPress={aiDiscard}><Text style={st.btnDiscardT}>Discard &amp; End Turn</Text></TouchableOpacity>}
-              {inAction&&setsComplete(g.playerSets)&&<TouchableOpacity style={st.btnWin} onPress={aiDeclareWin}><Text style={st.btnWinT}>🏆 Declare Win!</Text></TouchableOpacity>}
-            </View>
-            {sel>0&&<TouchableOpacity onPress={()=>setGame(gg=>({...gg,selIds:[]}))}><Text style={{fontSize:11,color:C.textFaint,textAlign:'center',marginTop:6}}>✕ Clear selection</Text></TouchableOpacity>}
-          </View>
-          {renderSets(g.playerSets,aiUndoSet)}
-          {isRoundOver&&renderRoundOver(
-            g.roundWinner,[g.scores.player,g.scores.ai],'You','AI',needed,
-            ()=>startAiGame(g),null,()=>setScreen('lobby'),
-            g.roundWinner==='player'?g.playerSets:g.aiSets
-          )}
-        </ScrollView>
-      </SafeAreaView>
-    );
-  }
-
-  return null;
+  },62000);
 }
 
-const st=StyleSheet.create({
-  bg:{flex:1,backgroundColor:C.bg},
-  lobby:{padding:20,paddingTop:40,paddingBottom:40},
-  lobbyTitle:{fontSize:42,fontWeight:'900',color:C.gold,textAlign:'center',letterSpacing:4,marginBottom:4},
-  lobbySub:{fontSize:14,color:C.purple,textAlign:'center',fontWeight:'600'},
-  lobbyCard:{backgroundColor:C.bg2,borderRadius:20,padding:16,marginBottom:20,borderWidth:1,borderColor:C.border},
-  label:{fontSize:11,fontWeight:'700',color:C.textFaint,letterSpacing:1.5,marginBottom:8},
-  sectionHead:{fontSize:14,fontWeight:'700',color:C.text,marginBottom:12,marginTop:4},
-  input:{backgroundColor:'#1a0533',borderWidth:1.5,borderColor:C.border,borderRadius:12,padding:14,color:C.text,fontSize:14,marginBottom:16},
-  modeRow:{flexDirection:'row',gap:8,marginBottom:4},
-  pill:{flex:1,borderWidth:1.5,borderColor:C.border,borderRadius:12,paddingVertical:14,alignItems:'center',backgroundColor:'#1a0533'},
-  pillOn:{borderColor:C.gold,backgroundColor:'#2D1F00'},
-  pillT:{fontSize:13,fontWeight:'700',color:C.textDim},
-  pillTOn:{color:C.gold},
-  pillS:{fontSize:10,color:C.textFaint,marginTop:2},
-  pillSOn:{color:C.gold2},
-  btnGold:{backgroundColor:C.gold,borderRadius:14,paddingVertical:16,alignItems:'center',marginBottom:12},
-  btnGoldT:{fontSize:16,fontWeight:'800',color:'#1C1917'},
-  btnOutline:{borderWidth:1.5,borderColor:C.purple,borderRadius:14,paddingVertical:14,alignItems:'center',marginBottom:12},
-  btnOutlineT:{fontSize:14,color:C.purple,fontWeight:'600'},
-  btnDeclare:{backgroundColor:C.green,borderRadius:12,paddingVertical:14,alignItems:'center',marginBottom:4},
-  btnDeclareT:{fontSize:15,fontWeight:'800',color:'#fff'},
-  btnDiscard:{backgroundColor:C.red,borderRadius:12,paddingVertical:13,alignItems:'center',marginBottom:4},
-  btnDiscardT:{fontSize:14,fontWeight:'700',color:'#fff'},
-  btnWin:{backgroundColor:C.gold,borderRadius:12,paddingVertical:15,alignItems:'center',marginBottom:4},
-  btnWinT:{fontSize:16,fontWeight:'900',color:'#1C1917'},
-  errT:{fontSize:13,color:'#FCA5A5',textAlign:'center',marginBottom:10},
-  divRow:{flexDirection:'row',alignItems:'center',gap:10,marginVertical:12},
-  divLine:{flex:1,height:1,backgroundColor:C.border},
-  divT:{color:C.textFaint,fontSize:13},
-  row:{flexDirection:'row',alignItems:'center',gap:8},
-  ruleCard:{backgroundColor:C.bg2,borderRadius:12,padding:16,marginBottom:10,borderWidth:1,borderColor:C.border},
-  ruleT:{fontSize:15,fontWeight:'700',color:C.gold,marginBottom:6},
-  ruleB:{fontSize:13,color:C.text,lineHeight:20},
-  waiting:{flex:1,alignItems:'center',justifyContent:'center',padding:20},
-  waitSub:{fontSize:15,color:C.text,marginTop:12,marginBottom:24},
-  waitMsg:{fontSize:13,color:C.textFaint,marginTop:20},
-  codeBox:{backgroundColor:C.bg2,borderWidth:3,borderColor:C.gold,borderRadius:20,paddingHorizontal:44,paddingVertical:24},
-  codeText:{fontSize:52,fontWeight:'900',color:C.gold,letterSpacing:10},
-  gameWrap:{padding:12,paddingTop:8,paddingBottom:40},
-  header:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',backgroundColor:C.bg2,borderRadius:16,padding:14,marginBottom:10,borderWidth:1,borderColor:C.border},
-  gameTitle:{fontSize:18,fontWeight:'900',color:C.gold,letterSpacing:2},
-  roundBadge:{fontSize:10,color:C.textFaint,marginTop:2},
-  timerBadge:{borderRadius:20,paddingHorizontal:10,paddingVertical:3,borderWidth:1,marginTop:4},
-  timerText:{fontSize:12,fontWeight:'700'},
-  scoreItem:{alignItems:'center',minWidth:50},
-  scoreN:{fontSize:26,fontWeight:'900',color:C.gold},
-  scoreLb:{fontSize:10,color:C.textDim},
-  oppZone:{backgroundColor:C.bg2,borderRadius:16,padding:12,marginBottom:10,borderWidth:1,borderColor:C.border},
-  oppTitle:{fontSize:13,fontWeight:'700',color:C.text,flex:1},
-  thinkingBadge:{backgroundColor:'#1F2937',borderRadius:20,paddingHorizontal:8,paddingVertical:3},
-  thinkingText:{fontSize:11,color:C.gold},
-  dimT:{fontSize:11,color:C.textFaint},
-  handRow:{flexDirection:'row',gap:5,paddingVertical:6},
-  badge:{paddingHorizontal:10,paddingVertical:4,borderRadius:20,backgroundColor:'#1F2937',borderWidth:1,borderColor:C.border},
-  badgeDone:{backgroundColor:C.success,borderColor:C.green},
-  badgeHalf:{backgroundColor:'#1F4D2E'},
-  badgeT:{fontSize:11,color:C.text},
-  pileLabel:{fontSize:10,fontWeight:'700',color:C.textFaint,letterSpacing:1,marginBottom:4},
-  tapHint:{fontSize:9,color:C.gold,marginTop:2,fontWeight:'600'},
-  deckPile:{width:64,height:88,borderRadius:10,alignItems:'center',justifyContent:'center',borderWidth:2,borderColor:C.border,position:'relative'},
-  discardPile:{borderRadius:10,borderWidth:2,borderColor:C.border,overflow:'hidden'},
-  pileGlow:{borderColor:C.gold,borderWidth:3},
-  emptyPile:{width:64,height:88,borderRadius:10,borderWidth:1.5,borderColor:C.border,borderStyle:'dashed',alignItems:'center',justifyContent:'center'},
-  deckCount:{position:'absolute',bottom:4,backgroundColor:'rgba(0,0,0,0.7)',borderRadius:8,paddingHorizontal:6,paddingVertical:2},
-  deckCountText:{fontSize:10,color:C.gold,fontWeight:'700'},
-  msgBox:{flex:1,backgroundColor:C.bg2,borderRadius:12,padding:10,justifyContent:'center',minHeight:88,borderWidth:1,borderColor:C.border},
-  msgText:{fontSize:12,color:C.text,lineHeight:18},
-  playerZone:{backgroundColor:C.bg2,borderRadius:16,padding:12,marginBottom:10,borderWidth:1,borderColor:C.border},
-  playerTitle:{fontSize:13,fontWeight:'700',color:C.text,flex:1},
-  yourTurnBadge:{backgroundColor:C.gold,borderRadius:20,paddingHorizontal:10,paddingVertical:3},
-  yourTurnText:{fontSize:10,fontWeight:'800',color:'#1C1917'},
-  card:{borderRadius:10,backgroundColor:'#ffffff',alignItems:'center',justifyContent:'center',borderWidth:2,borderColor:'#E5E7EB'},
-  cardSel:{borderColor:C.gold,borderWidth:3,transform:[{translateY:-10}]},
-  cardMove:{borderColor:C.blue,borderWidth:3,transform:[{translateY:-5}]},
-  cardBack:{borderRadius:10,backgroundColor:C.purple,alignItems:'center',justifyContent:'center',borderWidth:2,borderColor:'#5B21B6'},
-  cardBackInner:{width:'70%',height:'70%',borderRadius:6,borderWidth:1.5,borderColor:'#5B21B6',alignItems:'center',justifyContent:'center'},
-  cardBackLogo:{fontSize:16,fontWeight:'900',color:'rgba(255,255,255,0.4)'},
-  selInfo:{fontSize:11,color:C.gold,marginTop:6,fontWeight:'700'},
-  movBtn:{backgroundColor:C.border,borderRadius:8,paddingHorizontal:14,paddingVertical:8},
-  movBtnX:{backgroundColor:'#7f1d1d',borderRadius:8,paddingHorizontal:10,paddingVertical:8},
-  movBtnT:{fontSize:13,color:'#fff',fontWeight:'700'},
-  setsZone:{backgroundColor:C.bg2,borderRadius:16,padding:12,marginBottom:10,borderWidth:1,borderColor:C.border},
-  setsTitle:{fontSize:12,fontWeight:'700',color:C.textDim,marginBottom:10,letterSpacing:0.5},
-  setSlot:{borderWidth:1.5,borderColor:C.border,borderRadius:12,padding:10,marginBottom:8,borderStyle:'dashed'},
-  setSlotOn:{borderColor:C.green,borderStyle:'solid',backgroundColor:'#064E3B22'},
-  setSlotLbl:{fontSize:12,fontWeight:'700',color:C.textDim,flex:1},
-  undoBtn:{backgroundColor:'#374151',borderRadius:8,paddingHorizontal:10,paddingVertical:5},
-  undoBtnT:{fontSize:11,color:'#fff'},
-  chatZone:{backgroundColor:C.bg2,borderRadius:16,padding:12,marginBottom:10,borderWidth:1,borderColor:C.border},
-  chatToggle:{flexDirection:'row',alignItems:'center'},
-  chatToggleT:{fontSize:13,fontWeight:'700',color:C.purple},
-  chatMsgs:{maxHeight:120,marginTop:10},
-  bubble:{borderRadius:12,paddingHorizontal:12,paddingVertical:8,marginBottom:6,maxWidth:'80%'},
-  bubbleMe:{backgroundColor:C.gold,alignSelf:'flex-end'},
-  bubbleThem:{backgroundColor:C.border,alignSelf:'flex-start'},
-  bubbleText:{fontSize:13,color:C.text},
-  quickMsgs:{flexDirection:'row',gap:8,paddingVertical:8},
-  quickMsg:{backgroundColor:C.border,borderRadius:20,paddingHorizontal:12,paddingVertical:7},
-  quickMsgT:{fontSize:12,color:C.text},
-  roundOverZone:{backgroundColor:C.bg2,borderRadius:16,padding:16,marginBottom:10,borderWidth:2,borderColor:C.gold,alignItems:'center'},
-  roundOverEmoji:{fontSize:56,marginBottom:8},
-  roundOverTitle:{fontSize:22,fontWeight:'900',color:C.gold,marginBottom:16,textAlign:'center'},
-  revealTitle:{fontSize:13,fontWeight:'700',color:C.text,marginBottom:8},
-  scoreBox:{alignItems:'center',backgroundColor:'#1a0533',borderRadius:12,padding:14,minWidth:80},
-  scoreBoxN:{fontSize:28,fontWeight:'900',color:C.gold},
-  scoreBoxL:{fontSize:11,color:C.textDim},
-  seriesWinner:{fontSize:18,fontWeight:'800',color:C.gold,textAlign:'center'},
-  rejoinBanner:{backgroundColor:'#2D1500',borderWidth:2,borderColor:C.gold,borderRadius:16,padding:16,marginBottom:16},
-  rejoinTitle:{fontSize:16,fontWeight:'800',color:C.gold,marginBottom:4},
-  rejoinSub:{fontSize:13,color:C.textDim},
-  winOverlay:{backgroundColor:'rgba(0,0,0,0.75)',alignItems:'center',justifyContent:'center',zIndex:999},
-  winCard:{backgroundColor:C.bg2,borderRadius:24,padding:40,alignItems:'center',borderWidth:3,borderColor:C.gold,minWidth:240},
-  winTrophy:{fontSize:80,marginBottom:16},
-  winText:{fontSize:36,fontWeight:'900',letterSpacing:2,marginBottom:8},
+wss.on('connection',ws=>{
+  console.log('Client connected');
+  ws.on('message',raw=>{
+    let msg;
+    try{msg=JSON.parse(raw);}catch(e){return;}
+    const{type,code,name,totalGames,cardId,cardIds,setSize,slotIdx}=msg;
+
+    if(type==='PING'){send(ws,{type:'PONG'});return;}
+
+    if(type==='CREATE_ROOM'){
+      const roomCode=generateCode();
+      rooms[roomCode]={
+        code:roomCode,
+        totalGames:totalGames||3,
+        players:[{ws,hand:[],sets:[null,null,null],name:name||'Player 1',disconnected:false}],
+        deck:[],discard:[],usedPool:[],
+        scores:[0,0],turn:0,phase:'draw',lastWinner:null,round:0,
+        started:false,turnTimer:null,
+      };
+      ws.roomCode=roomCode;ws.playerIdx=0;ws.playerName=name||'Player 1';
+      send(ws,{type:'ROOM_CREATED',code:roomCode});
+      console.log(`Room created: ${roomCode}`);
+    }
+
+    else if(type==='JOIN_ROOM'){
+      const room=rooms[code];
+      if(!room){send(ws,{type:'ERROR',msg:'Room not found'});return;}
+      if(room.players.length>=2&&!room.players.some(p=>p.disconnected)){
+        send(ws,{type:'ERROR',msg:'Room is full'});return;
+      }
+      room.players.push({ws,hand:[],sets:[null,null,null],name:name||'Player 2',disconnected:false});
+      ws.roomCode=code;ws.playerIdx=1;ws.playerName=name||'Player 2';
+      dealRound(room);
+      room.started=true;
+      broadcast(room,{type:'GAME_START'});
+      sendGameState(room);
+      startTurnTimer(room);
+      console.log(`Game started in room ${code}`);
+    }
+
+    else if(type==='REJOIN'){
+      const room=rooms[code];
+      if(!room){send(ws,{type:'ERROR',msg:'Room not found or expired'});return;}
+      const pidx=room.players.findIndex(p=>p.name===name&&p.disconnected);
+      if(pidx===-1){send(ws,{type:'ERROR',msg:'Could not find your slot.'});return;}
+      room.players[pidx].ws=ws;
+      room.players[pidx].disconnected=false;
+      ws.roomCode=code;ws.playerIdx=pidx;ws.playerName=name;
+      send(ws,{type:'GAME_START'});
+      sendGameState(room);
+      const opp=room.players[1-pidx];
+      if(opp&&opp.ws&&!opp.disconnected) send(opp.ws,{type:'OPPONENT_RECONNECTED',name});
+      console.log(`Player ${name} rejoined room ${code}`);
+    }
+
+    else{
+      const room=rooms[ws.roomCode];
+      if(!room)return;
+      const pidx=ws.playerIdx;
+
+      if(type==='DRAW_DECK'){
+        if(room.turn!==pidx||room.phase!=='draw')return;
+        if(room.deck.length===0){endRound(room,null);return;}
+        room.players[pidx].hand.push(room.deck.shift());
+        room.phase='action';
+        startTurnTimer(room);
+        sendGameState(room);
+      }
+      else if(type==='TAKE_DISCARD'){
+        if(room.turn!==pidx||room.phase!=='draw')return;
+        if(room.discard.length===0){send(ws,{type:'ERROR',msg:'Discard pile is empty'});return;}
+        const card=room.discard[room.discard.length-1];
+        room.discard=room.discard.slice(0,-1);
+        room.players[pidx].hand.push(card);
+        room.phase='action';
+        startTurnTimer(room);
+        sendGameState(room);
+      }
+      else if(type==='DECLARE_SET'){
+        if(room.turn!==pidx||room.phase!=='action')return;
+        const player=room.players[pidx];
+        const cards=player.hand.filter(c=>cardIds.includes(c.id));
+        if(cards.length!==setSize){send(ws,{type:'ERROR',msg:`Select exactly ${setSize} cards`});return;}
+        if(!isValidSet(cards)){send(ws,{type:'ERROR',msg:'Invalid set'});return;}
+        const f=player.sets.filter(Boolean);
+        if(setSize===4&&f.filter(s=>s.length===4).length>=1){send(ws,{type:'ERROR',msg:'Already have set of 4'});return;}
+        if(setSize===3&&f.filter(s=>s.length===3).length>=2){send(ws,{type:'ERROR',msg:'Already have 2 sets of 3'});return;}
+        let slot=-1;
+        if(setSize===4){
+          slot=player.sets[0]===null?0:player.sets.findIndex(s=>s===null);
+        } else {
+          const hasFour=player.sets.some(s=>s&&s.length===4);
+          if(!hasFour){
+            slot=player.sets.findIndex((s,i)=>s===null&&i>0);
+            if(slot===-1)slot=player.sets.findIndex(s=>s===null);
+          } else {
+            slot=player.sets.findIndex(s=>s===null);
+          }
+        }
+        if(slot<0){send(ws,{type:'ERROR',msg:'All slots full'});return;}
+        player.sets[slot]=cards;
+        player.hand=player.hand.filter(c=>!cardIds.includes(c.id));
+        sendGameState(room);
+      }
+      else if(type==='UNDO_SET'){
+        if(room.turn!==pidx||room.phase!=='action')return;
+        const player=room.players[pidx];
+        if(!player.sets[slotIdx])return;
+        const cards=player.sets[slotIdx];
+        player.sets[slotIdx]=null;
+        player.hand=[...player.hand,...cards];
+        sendGameState(room);
+      }
+      else if(type==='DISCARD_CARD'){
+        if(room.turn!==pidx||room.phase!=='action')return;
+        const player=room.players[pidx];
+        const idx=player.hand.findIndex(c=>c.id===cardId);
+        if(idx<0)return;
+        room.discard.push(player.hand.splice(idx,1)[0]);
+        room.turn=1-pidx;
+        room.phase='draw';
+        startTurnTimer(room);
+        sendGameState(room);
+      }
+      else if(type==='DECLARE_WIN'){
+        if(room.turn!==pidx||room.phase!=='action')return;
+        const player=room.players[pidx];
+        if(!setsComplete(player.sets)){send(ws,{type:'ERROR',msg:'Sets not complete'});return;}
+        endRound(room,pidx);
+      }
+      else if(type==='NEXT_ROUND'){
+        if(room.scores[0]>=room.totalGames||room.scores[1]>=room.totalGames)return;
+        dealRound(room);
+        broadcast(room,{type:'GAME_START'});
+        sendGameState(room);
+        startTurnTimer(room);
+      }
+      else if(type==='CHAT'){
+        const opp=room.players[1-pidx];
+        if(opp&&opp.ws&&!opp.disconnected) send(opp.ws,{type:'CHAT',text:msg.text});
+      }
+    }
+  });
+
+  ws.on('close',()=>{
+    const room=rooms[ws.roomCode];
+    if(room&&ws.playerIdx!==undefined&&room.players[ws.playerIdx]){
+      room.players[ws.playerIdx].disconnected=true;
+      room.players[ws.playerIdx].ws=null;
+      console.log(`Player ${ws.playerName} disconnected from room ${ws.roomCode}`);
+      const opp=room.players[1-ws.playerIdx];
+      if(opp&&opp.ws&&!opp.disconnected){
+        send(opp.ws,{type:'OPPONENT_DISCONNECTED',name:ws.playerName,roomCode:ws.roomCode});
+      }
+      setTimeout(()=>{
+        if(rooms[ws.roomCode]&&room.players[ws.playerIdx]&&room.players[ws.playerIdx].disconnected){
+          delete rooms[ws.roomCode];
+          console.log(`Room ${ws.roomCode} expired`);
+        }
+      },5*60*1000);
+    }
+    console.log('Client disconnected');
+  });
 });
+
+console.log(`Server running on port ${PORT}`);
