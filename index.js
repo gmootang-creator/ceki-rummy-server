@@ -10,9 +10,9 @@ const {width:SW,height:SH}=Dimensions.get('window');
 
 const C = {
   bg:'#1a0533',bg2:'#2d0f4e',gold:'#F59E0B',gold2:'#D97706',
-  green:'#10B981',green2:'#064E3B',red:'#EF4444',blue:'#3B82F6',
+  green:'#10B981',red:'#EF4444',blue:'#3B82F6',
   purple:'#8B5CF6',text:'#F3F4F6',textDim:'#9CA3AF',textFaint:'#6B7280',
-  border:'#4C1D95',success:'#065F46',successBorder:'#10B981',
+  border:'#4C1D95',success:'#065F46',
 };
 
 const SUITS=['♠','♥','♦','♣'];
@@ -65,7 +65,6 @@ function Confetti({active}){
       size:8+Math.random()*8,
     }))
   ).current;
-
   useEffect(()=>{
     if(!active)return;
     particles.forEach((p,i)=>{
@@ -78,7 +77,6 @@ function Confetti({active}){
       ]).start();
     });
   },[active]);
-
   if(!active)return null;
   return(
     <View style={StyleSheet.absoluteFill} pointerEvents="none">
@@ -97,7 +95,6 @@ function WinOverlay({visible,winner,onDone}){
   const scale=useRef(new Animated.Value(0)).current;
   const opacity=useRef(new Animated.Value(0)).current;
   const trophy=useRef(new Animated.Value(0)).current;
-
   useEffect(()=>{
     if(!visible)return;
     scale.setValue(0);opacity.setValue(0);trophy.setValue(0);
@@ -111,11 +108,9 @@ function WinOverlay({visible,winner,onDone}){
     const t=setTimeout(onDone,3500);
     return()=>clearTimeout(t);
   },[visible]);
-
   if(!visible)return null;
   const isWin=winner==='you'||winner==='player';
   const isTie=winner==='tie';
-
   return(
     <Animated.View style={[StyleSheet.absoluteFill,st.winOverlay,{opacity}]} pointerEvents="none">
       <Confetti active={visible&&isWin}/>
@@ -124,19 +119,19 @@ function WinOverlay({visible,winner,onDone}){
           {isWin?'🏆':isTie?'🤝':'😔'}
         </Animated.Text>
         <Text style={[st.winText,{color:isWin?C.gold:isTie?C.textDim:C.red}]}>
-          {isWin?'YOU WIN!':isTie?'IT\'S A TIE!':'YOU LOSE!'}
+          {isWin?'YOU WIN!':isTie?'TIE!':'YOU LOSE!'}
         </Text>
       </Animated.View>
     </Animated.View>
   );
 }
 
-function CardDisplay({card,selected,isMove,small}){
+function CardDisplay({card,small}){
   const size=small?{width:38,height:52}:{width:56,height:78};
   const rankSize=small?11:15;
   const suitSize=small?13:20;
   return(
-    <View style={[st.card,size,selected&&st.cardSel,isMove&&st.cardMove]}>
+    <View style={[st.card,size]}>
       {isJoker(card)?(
         <><Text style={{fontSize:rankSize+2,fontWeight:'800',color:'#8B5CF6'}}>★</Text><Text style={{fontSize:rankSize-2,color:'#8B5CF6'}}>Joker</Text></>
       ):(
@@ -180,7 +175,7 @@ const CHAT_MESSAGES=['👋 Hey!','😂 Lol','😤 Lucky!','🎉 Nice!','😮 Wow
 
 export default function App(){
   const [screen,setScreen]=useState('lobby');
-  const [mode,setMode]=useState(5);
+  const [mode,setMode]=useState(3);
   const [playerName,setPlayerName]=useState('');
   const [joinCode,setJoinCode]=useState('');
   const [roomCode,setRoomCode]=useState('');
@@ -344,7 +339,7 @@ export default function App(){
       stopTurnTimer();setRoundOver(data);setSelIds([]);setMoveIdx(null);
       if(data.winner==='you'){vibrate('success');playSound('win');showWinAnimation('you');}
       else if(data.winner==='opponent'){vibrate('heavy');playSound('lose');showWinAnimation('opponent');}
-      else{showWinAnimation('tie');}
+      else showWinAnimation('tie');
     }
     else if(data.type==='CHAT'){setChatMsgs(m=>[...m,{text:data.text,isMe:false}]);setNewMsg(true);vibrate('light');}
     else if(data.type==='TIMES_UP'){
@@ -403,7 +398,18 @@ export default function App(){
     const playerHand=fresh.splice(0,winner==='player'?11:10);
     const aiHand=fresh.splice(0,winner==='ai'?11:10);
     const starter=winner||(Math.random()<0.5?'player':'ai');
-    const g={deck:fresh,discard:[],playerHand,aiHand,playerSets:[null,null,null],aiSets:[null,null,null],scores:prev?prev.scores:{player:0,ai:0},totalGames:prev?prev.totalGames:mode,currentRound:prev?prev.currentRound+1:1,turn:starter,phase:'draw',selIds:[],moveIdx:null,roundWinner:null,msg:starter==='player'?'Your turn — tap DECK or DISCARD':'Opponent goes first...'};
+    // Winner starts in action phase with 11 cards — must discard first
+    const startPhase=winner?'action':'draw';
+    const g={deck:fresh,discard:[],playerHand,aiHand,
+      playerSets:[null,null,null],aiSets:[null,null,null],
+      scores:prev?prev.scores:{player:0,ai:0},
+      totalGames:prev?prev.totalGames:mode,
+      currentRound:prev?prev.currentRound+1:1,
+      turn:starter,phase:startPhase,selIds:[],moveIdx:null,roundWinner:null,
+      msg:starter==='player'
+        ?(startPhase==='action'?'You won last round — discard a card to start!':'Your turn — tap DECK or DISCARD')
+        :'Opponent goes first...'
+    };
     setGame(g);setScreen('ai-game');
     if(starter==='ai')setTimeout(()=>doAiTurn(g),1200);
   };
@@ -413,6 +419,13 @@ export default function App(){
       const cur=g||initial;
       if(!cur||cur.turn!=='ai')return cur;
       let deck=[...cur.deck],discard=[...cur.discard],aiHand=[...cur.aiHand],aiSets=[...cur.aiSets];
+      // If AI has 11 cards (won last round) just discard first
+      if(cur.phase==='action'&&aiHand.length===11){
+        const jokerIdx=aiHand.findIndex(c=>isJoker(c));
+        const card=jokerIdx>=0?aiHand.splice(jokerIdx,1)[0]:aiHand.splice(Math.floor(Math.random()*aiHand.length),1)[0];
+        discard.push(card);
+        return{...cur,aiHand,deck,discard,turn:'player',phase:'draw',selIds:[],moveIdx:null,msg:'Your turn — tap DECK or DISCARD'};
+      }
       if(discard.length>0&&Math.random()<0.4)aiHand.push(discard.pop());
       else if(deck.length>0)aiHand.push(deck.shift());
       else return{...cur,turn:'done',roundWinner:null,msg:"It's a tie!"};
@@ -490,42 +503,34 @@ export default function App(){
     </View>
   );
 
-  const renderRoundOver=(winner,scores,yourName,oppName,needed,onNext,onRematch,onLeave,winnerSets,yourSets)=>(
+  const renderRoundOver=(winner,scores,yourName,oppName,needed,onNext,onRematch,onLeave,winnerSets)=>(
     <View style={st.roundOverZone}>
       <Text style={st.roundOverEmoji}>{winner==='player'||winner==='you'?'🏆':winner==='tie'?'🤝':'😔'}</Text>
       <Text style={st.roundOverTitle}>{winner==='you'||winner==='player'?'You win the round!':winner==='tie'?'It\'s a tie!':'You lose the round!'}</Text>
-
-      {/* Winner's sets revealed */}
       {winnerSets&&winnerSets.filter(Boolean).length>0&&(
         <View style={{marginBottom:12,width:'100%'}}>
-          <Text style={st.revealTitle}>
-            {winner==='you'||winner==='player'?'✨ Your winning sets:':'🏆 Opponent\'s winning sets:'}
-          </Text>
+          <Text style={st.revealTitle}>{winner==='you'||winner==='player'?'✨ Your winning sets:':'🏆 Opponent\'s winning sets:'}</Text>
           {winnerSets.filter(Boolean).map((set,i)=>(
             <View key={i} style={{marginBottom:8}}>
               <Text style={st.dimT}>{set.length===4?'Set of 4':'Set of 3'}:</Text>
-              <View style={[st.row,{flexWrap:'wrap',gap:4,marginTop:4}]}>
-                {set.map(c=><CardDisplay key={c.id} card={c} small/>)}
-              </View>
+              <View style={[st.row,{flexWrap:'wrap',gap:4,marginTop:4}]}>{set.map(c=><CardDisplay key={c.id} card={c} small/>)}</View>
             </View>
           ))}
         </View>
       )}
-
-      {/* Scores */}
       <View style={[st.row,{justifyContent:'center',gap:16,marginBottom:12}]}>
         <View style={st.scoreBox}><Text style={st.scoreBoxN}>{scores[0]}</Text><Text style={st.scoreBoxL}>{yourName}</Text></View>
         <Text style={{fontSize:20,color:C.textFaint}}>–</Text>
         <View style={st.scoreBox}><Text style={st.scoreBoxN}>{scores[1]}</Text><Text style={st.scoreBoxL}>{oppName}</Text></View>
       </View>
-
+      <Text style={st.dimT}>First to {needed} wins the match</Text>
       {scores[0]>=needed||scores[1]>=needed?(
-        <>
-          <Text style={st.seriesWinner}>{scores[0]>scores[1]?'🏆 You win the match!':scores[1]>scores[0]?'😔 Opponent wins the match!':'🤝 Match tied!'}</Text>
-          {onRematch&&<TouchableOpacity style={[st.btnDeclare,{marginBottom:8,backgroundColor:C.purple}]} onPress={onRematch}><Text style={st.btnDeclareT}>🔄 Rematch</Text></TouchableOpacity>}
-        </>
+        <View style={{marginTop:12,width:'100%'}}>
+          <Text style={[st.seriesWinner,{marginBottom:12}]}>{scores[0]>scores[1]?'🏆 You win the match!':scores[1]>scores[0]?'😔 Opponent wins the match!':'🤝 Match tied!'}</Text>
+          {onRematch&&<TouchableOpacity style={[st.btnDeclare,{marginBottom:8,backgroundColor:C.purple}]} onPress={onRematch}><Text style={st.btnDeclareT}>🔄 Play Again</Text></TouchableOpacity>}
+        </View>
       ):(
-        <TouchableOpacity style={[st.btnDeclare,{marginBottom:8}]} onPress={onNext}><Text style={st.btnDeclareT}>Next Round ▶</Text></TouchableOpacity>
+        <TouchableOpacity style={[st.btnDeclare,{marginBottom:8,marginTop:12}]} onPress={onNext}><Text style={st.btnDeclareT}>Next Round ▶</Text></TouchableOpacity>
       )}
       <TouchableOpacity style={st.btnOutline} onPress={onLeave}><Text style={st.btnOutlineT}>Leave Game</Text></TouchableOpacity>
     </View>
@@ -560,8 +565,8 @@ export default function App(){
           <View style={st.modeRow}>
             {[3,5,10].map(m=>(
               <TouchableOpacity key={m} style={[st.pill,mode===m&&st.pillOn]} onPress={()=>{vibrate();setMode(m);}}>
-                <Text style={[st.pillT,mode===m&&st.pillTOn]}>Best of {m}</Text>
-                <Text style={[st.pillS,mode===m&&st.pillSOn]}>First to {Math.ceil(m/2)}</Text>
+                <Text style={[st.pillT,mode===m&&st.pillTOn]}>First to {m}</Text>
+                <Text style={[st.pillS,mode===m&&st.pillSOn]}>{m} wins</Text>
               </TouchableOpacity>
             ))}
           </View>
@@ -604,7 +609,7 @@ export default function App(){
         <Text style={st.lobbyTitle}>How to Play</Text>
         {[
           ['🎯 Goal','Complete 3 sets: 1 set of 4 cards AND 2 sets of 3 cards, then declare win.'],
-          ['🃏 Deck','52 cards + 1 Joker. Each player gets 10 cards (winner gets 11 next round).'],
+          ['🃏 Deck','52 cards + 1 Joker. Each player gets 10 cards. Winner of each round gets 11 cards next round but must discard first.'],
           ['🔄 Your Turn','1. Tap DECK or DISCARD to draw.\n2. Tap cards to select for sets.\n3. Declare sets anytime.\n4. Tap 1 card then Discard to end turn.'],
           ['✅ Valid Sets','Same rank (e.g. K♠ K♥ K♦) OR same suit consecutive (e.g. 3♥ 4♥ 5♥). Joker fills any gap.'],
           ['🏆 Winning','Fill all 3 slots (1×4 + 2×3) then tap Declare Win. Only winner\'s sets are revealed!'],
@@ -613,6 +618,7 @@ export default function App(){
           ['💬 Chat','Tap Chat during online games to send quick messages.'],
           ['🔄 Rejoin','If you lose connection tap Rejoin Game on the lobby screen.'],
           ['⏱ Timer','60 seconds per turn. Draw timeout = lose turn. Action timeout = random card discarded.'],
+          ['🏅 Match','Choose First to 3, 5 or 10 wins. First player to reach that number wins the match!'],
         ].map(([t,b])=>(
           <View key={t} style={st.ruleCard}><Text style={st.ruleT}>{t}</Text><Text style={st.ruleB}>{b}</Text></View>
         ))}
@@ -631,7 +637,7 @@ export default function App(){
     const myFours=o.yourSets.filter(Boolean).filter(s=>s.length===4).length;
     const myThrees=o.yourSets.filter(Boolean).filter(s=>s.length===3).length;
     const sel=selIds.length;
-    const needed=Math.ceil(o.totalGames/2);
+    const needed=o.totalGames;
     const timerColor=timeLeft<=10?C.red:timeLeft<=20?C.gold:C.green;
 
     return(
@@ -643,7 +649,7 @@ export default function App(){
             <View style={st.scoreItem}><Text style={st.scoreN}>{o.scores[0]}</Text><Text style={st.scoreLb}>{o.yourName}</Text></View>
             <View style={{alignItems:'center'}}>
               <Text style={st.gameTitle}>RUMIKI</Text>
-              <Text style={st.roundBadge}>Best of {o.totalGames} · Need {needed}</Text>
+              <Text style={st.roundBadge}>First to {needed} wins</Text>
               {isMyTurn&&<View style={[st.timerBadge,{backgroundColor:timerColor+'33',borderColor:timerColor}]}><Text style={[st.timerText,{color:timerColor}]}>⏱ {timeLeft}s</Text></View>}
             </View>
             <View style={st.scoreItem}><Text style={st.scoreN}>{o.scores[1]}</Text><Text style={st.scoreLb}>{o.oppName}</Text></View>
@@ -668,8 +674,7 @@ export default function App(){
             <View style={{alignItems:'center'}}>
               <Text style={st.pileLabel}>DECK</Text>
               <TouchableOpacity style={[st.deckPile,inDraw&&st.pileGlow]} onPress={()=>{if(!inDraw)return;vibrate();playSound('card');sendWS({type:'DRAW_DECK'});}}>
-                <CardBack/>
-                <View style={st.deckCount}><Text style={st.deckCountText}>{o.deckCount}</Text></View>
+                <CardBack/><View style={st.deckCount}><Text style={st.deckCountText}>{o.deckCount}</Text></View>
               </TouchableOpacity>
               {inDraw&&<Text style={st.tapHint}>tap to draw</Text>}
             </View>
@@ -738,8 +743,7 @@ export default function App(){
             ()=>sendWS({type:'NEXT_ROUND'}),
             ()=>sendWS({type:'NEXT_ROUND'}),
             ()=>{closeWS();setScreen('lobby');},
-            roundOver.winnerSets,
-            roundOver.yourSets
+            roundOver.winnerSets
           )}
         </ScrollView>
       </SafeAreaView>
@@ -749,7 +753,7 @@ export default function App(){
   // ── AI GAME ──
   if(screen==='ai-game'&&game){
     const g=game;
-    const needed=Math.ceil(g.totalGames/2);
+    const needed=g.totalGames;
     const isMyTurn=g.turn==='player';
     const inAction=isMyTurn&&g.phase==='action';
     const inDraw=isMyTurn&&g.phase==='draw';
@@ -765,7 +769,7 @@ export default function App(){
         <ScrollView contentContainerStyle={st.gameWrap}>
           <View style={st.header}>
             <View style={st.scoreItem}><Text style={st.scoreN}>{g.scores.player}</Text><Text style={st.scoreLb}>You</Text></View>
-            <View style={{alignItems:'center'}}><Text style={st.gameTitle}>RUMIKI</Text><Text style={st.roundBadge}>Best of {g.totalGames} · Need {needed}</Text></View>
+            <View style={{alignItems:'center'}}><Text style={st.gameTitle}>RUMIKI</Text><Text style={st.roundBadge}>First to {needed} wins</Text></View>
             <View style={st.scoreItem}><Text style={st.scoreN}>{g.scores.ai}</Text><Text style={st.scoreLb}>AI</Text></View>
           </View>
           <View style={st.oppZone}>
@@ -827,8 +831,7 @@ export default function App(){
           {isRoundOver&&renderRoundOver(
             g.roundWinner,[g.scores.player,g.scores.ai],'You','AI',needed,
             ()=>startAiGame(g),null,()=>setScreen('lobby'),
-            g.roundWinner==='player'?g.playerSets:g.aiSets,
-            g.playerSets
+            g.roundWinner==='player'?g.playerSets:g.aiSets
           )}
         </ScrollView>
       </SafeAreaView>
@@ -945,7 +948,7 @@ const st=StyleSheet.create({
   scoreBox:{alignItems:'center',backgroundColor:'#1a0533',borderRadius:12,padding:14,minWidth:80},
   scoreBoxN:{fontSize:28,fontWeight:'900',color:C.gold},
   scoreBoxL:{fontSize:11,color:C.textDim},
-  seriesWinner:{fontSize:18,fontWeight:'800',color:C.gold,textAlign:'center',marginBottom:12},
+  seriesWinner:{fontSize:18,fontWeight:'800',color:C.gold,textAlign:'center'},
   rejoinBanner:{backgroundColor:'#2D1500',borderWidth:2,borderColor:C.gold,borderRadius:16,padding:16,marginBottom:16},
   rejoinTitle:{fontSize:16,fontWeight:'800',color:C.gold,marginBottom:4},
   rejoinSub:{fontSize:13,color:C.textDim},
